@@ -1,0 +1,9 @@
+{
+  "id": "C04",
+  "category": "Safe Control",
+  "scenario": "Single-Owner Channel Actor",
+  "detected_by_race": false,
+  "rely": "All state mutations occur inside the actor select loop.",
+  "guarantee": "Balance updates are serialized sequentially by the owner goroutine.",
+  "interleaving_trigger": "NONE"
+}

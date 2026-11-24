@@ -1,0 +1,9 @@
+{
+  "id": "C06",
+  "category": "Safe Control",
+  "scenario": "Bounded Semaphore with Context Cancellation",
+  "detected_by_race": false,
+  "rely": "Semaphore slots are always released via defer.",
+  "guarantee": "Acquiring a slot respects context cancellation without leaking tokens.",
+  "interleaving_trigger": "NONE"
+}

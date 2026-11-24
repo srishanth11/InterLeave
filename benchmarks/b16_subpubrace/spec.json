@@ -1,0 +1,9 @@
+{
+  "id": "B16",
+  "category": "Atomicity Violation",
+  "scenario": "Check-Version-Then-Subscribe Missed Notification Window",
+  "detected_by_race": false,
+  "rely": "No PublishNext() increments b.version between LatestVersion() and Subscribe() in CallerWatchFromCurrent.",
+  "guarantee": "Subscriber channel receives every version strictly greater than returned snapshot version v.",
+  "interleaving_trigger": "G1 reads v=1 in LatestVersion(); G2 calls PublishNext() advancing version to 2 before G1 registers in Subscribe()."
+}

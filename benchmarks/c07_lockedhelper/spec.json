@@ -1,0 +1,9 @@
+{
+  "id": "C07",
+  "category": "Safe Control",
+  "scenario": "Caller-Enforced Lock Discipline Over Unsynchronized Internal Helpers",
+  "detected_by_race": false,
+  "rely": "Callers of subCheckingLocked and addSavingsLocked hold l.mu.Lock().",
+  "guarantee": "checking + savings remains strictly conserved across all concurrent operations.",
+  "interleaving_trigger": "None (Safe)"
+}

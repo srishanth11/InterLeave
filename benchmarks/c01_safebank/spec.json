@@ -1,0 +1,9 @@
+{
+  "id": "C01",
+  "category": "Safe Control",
+  "scenario": "Atomic Single-Lock Bank",
+  "detected_by_race": false,
+  "rely": "Other goroutines acquire a.mu before inspecting or mutating a.balance.",
+  "guarantee": "Check and deduction execute atomically inside a single critical section; balance >= 0.",
+  "interleaving_trigger": "NONE"
+}

@@ -1,0 +1,9 @@
+{
+  "id": "B18",
+  "category": "Deadlock",
+  "scenario": "Reentrant RWMutex Read-Lock Deadlock Under Writer Contention",
+  "detected_by_race": false,
+  "rely": "No goroutine holds r.mu.RLock() when calling a callee that also acquires r.mu.RLock() while a writer invokes r.mu.Lock().",
+  "guarantee": "CallerResolveConfig and Update complete without circular RWMutex wait.",
+  "interleaving_trigger": "G1 acquires outer RLock in ReadWithFallback; G2 calls Update() and blocks on Lock() (blocking new RLocks); G1 calls lookupInternal() which blocks forever on inner RLock()."
+}

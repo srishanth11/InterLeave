@@ -1,0 +1,9 @@
+{
+  "id": "C03",
+  "category": "Safe Control",
+  "scenario": "Epoch-Guarded Optimistic Commit",
+  "detected_by_race": false,
+  "rely": "Concurrent writers increment epoch under mu.",
+  "guarantee": "Optimistic update commits only if epoch matches the read snapshot.",
+  "interleaving_trigger": "NONE"
+}

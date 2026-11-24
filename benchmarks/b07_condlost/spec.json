@@ -1,0 +1,9 @@
+{
+  "id": "B07",
+  "category": "Atomicity / Condition Synchronization",
+  "scenario": "Cond-Var Lost Wakeup",
+  "detected_by_race": false,
+  "rely": "Signals are not lost between checking len(q.items) == 0 and Wait(), and no third thread steals items.",
+  "guarantee": "Dequeue blocks safely until len(q.items) > 0 under q.mu and pops a valid element.",
+  "interleaving_trigger": "G1 checks len(q.items) == 0 and enters Wait(); G2 enqueues and calls Signal() before G1 parks."
+}

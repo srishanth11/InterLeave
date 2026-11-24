@@ -1,0 +1,9 @@
+{
+  "id": "B09",
+  "category": "Cross-Struct Atomicity Violation",
+  "scenario": "Split-Lock Warehouse Rebalance",
+  "detected_by_race": false,
+  "rely": "No audit or transfer reads WarehouseA and WarehouseB mid-rebalance.",
+  "guarantee": "Total stock across WarehouseA and WarehouseB remains constant.",
+  "interleaving_trigger": "G1 deducts from WarehouseA and unlocks; G2 audits both warehouses before G1 adds to WarehouseB."
+}

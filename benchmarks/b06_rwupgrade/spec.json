@@ -1,0 +1,9 @@
+{
+  "id": "B06",
+  "category": "Deadlock",
+  "scenario": "Two-Tier Cache Lock-Order Inversion Deadlock",
+  "detected_by_race": false,
+  "rely": "No concurrent goroutine acquires c.store.mu before c.mu while GetOrRefresh holds c.mu.",
+  "guarantee": "GetOrRefresh and PushUpdate complete in bounded time without deadlocking.",
+  "interleaving_trigger": "G1 calls GetOrRefresh() and locks c.mu; G2 calls PushUpdate() and locks c.store.mu; both block forever waiting for the other's mutex."
+}

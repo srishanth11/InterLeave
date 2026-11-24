@@ -1,0 +1,9 @@
+{
+  "id": "B01",
+  "category": "Atomicity Violation",
+  "scenario": "Bank Double-Withdrawal",
+  "detected_by_race": false,
+  "rely": "Other goroutines do not deduct from a.balance between GetBalance() and Deduct().",
+  "guarantee": "a.balance never drops below 0 and total withdrawn does not exceed initial balance.",
+  "interleaving_trigger": "G1 calls GetBalance() and sees balance >= amt; G2 calls ProcessWithdraw() and deducts amt; G1 resumes and calls Deduct(amt)."
+}

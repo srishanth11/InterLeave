@@ -1,0 +1,9 @@
+{
+  "id": "B02",
+  "category": "TOCTOU Race",
+  "scenario": "Flight Seat Double-Booking",
+  "detected_by_race": false,
+  "rely": "No other goroutine books the same seat between IsFree(seat) and Book(seat, passenger).",
+  "guarantee": "At most one caller receives true for a given seat and remains the recorded owner.",
+  "interleaving_trigger": "G1 and G2 both call IsFree(12) and observe true; both call Book(12, ...) and return true."
+}

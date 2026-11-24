@@ -1,0 +1,9 @@
+{
+  "id": "C02",
+  "category": "Safe Control",
+  "scenario": "Channel-Based Worker Queue",
+  "detected_by_race": false,
+  "rely": "Channel ownership guarantees single-consumer delivery per job.",
+  "guarantee": "Every job is processed exactly once without shared memory races.",
+  "interleaving_trigger": "NONE"
+}

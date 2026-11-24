@@ -1,0 +1,9 @@
+{
+  "id": "B04",
+  "category": "Deadlock",
+  "scenario": "AB-BA Lock Inversion",
+  "detected_by_race": false,
+  "rely": "No concurrent goroutine acquires locks on (to, from) in reverse order while Transfer holds from.mu.",
+  "guarantee": "Transfer completes without deadlocking and preserves total balance.",
+  "interleaving_trigger": "G1 calls Transfer(W1, W2) and locks W1.mu; G2 calls Transfer(W2, W1) and locks W2.mu."
+}

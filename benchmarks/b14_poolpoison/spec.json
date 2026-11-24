@@ -1,0 +1,9 @@
+{
+  "id": "B14",
+  "category": "Atomicity Violation",
+  "scenario": "Premature Pool Release / Use-After-Release State Corruption",
+  "detected_by_race": false,
+  "rely": "Caller performs no writes to SessionBuf after calling p.Release(buf).",
+  "guarantee": "Acquired SessionBuf remains clean (dirty == false) and exclusively owned until Release.",
+  "interleaving_trigger": "G1 calls p.Release(buf); G2 calls p.Acquire('bob') and resets dirty=false; G1 then sets buf.dirty=true on G2's active session."
+}

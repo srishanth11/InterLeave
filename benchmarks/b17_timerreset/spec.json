@@ -1,0 +1,9 @@
+{
+  "id": "B17",
+  "category": "Channel Bug",
+  "scenario": "Undrained time.Timer Reset Stale Tick Race",
+  "detected_by_race": false,
+  "rely": "w.timer.C is empty whenever Kick(d) resets the watchdog deadline.",
+  "guarantee": "WaitExpired() blocks for at least duration d after CallerExtendDeadline completes.",
+  "interleaving_trigger": "Initial timer expires putting a tick into w.timer.C; G1 calls Kick(500ms) without draining w.timer.C; G2 immediately receives stale tick in 0ms."
+}

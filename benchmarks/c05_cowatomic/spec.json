@@ -1,0 +1,9 @@
+{
+  "id": "C05",
+  "category": "Safe Control",
+  "scenario": "Copy-on-Write Atomic Pointer Swap",
+  "detected_by_race": false,
+  "rely": "Published RouteTable snapshots are never mutated in place.",
+  "guarantee": "Readers always observe a consistent immutable snapshot.",
+  "interleaving_trigger": "NONE"
+}

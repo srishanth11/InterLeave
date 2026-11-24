@@ -1,0 +1,9 @@
+{
+  "id": "C08",
+  "category": "Safe Control",
+  "scenario": "Channel-Confined Single-Goroutine Map Ownership (No Mutex Required)",
+  "detected_by_race": false,
+  "rely": "Only loop() reads or writes the local state map; callers interact solely over s.reqs.",
+  "guarantee": "Sequential consistency and race-free increments without lock contention.",
+  "interleaving_trigger": "None (Safe)"
+}

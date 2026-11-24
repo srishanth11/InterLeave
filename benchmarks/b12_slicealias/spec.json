@@ -1,0 +1,9 @@
+{
+  "id": "B12",
+  "category": "Data Race / Memory Aliasing",
+  "scenario": "Slice Backing-Array Capacity Aliasing",
+  "detected_by_race": true,
+  "rely": "Sub-slices passed to concurrent workers have capped capacity (full slice expression).",
+  "guarantee": "Concurrent append calls do not overwrite elements in adjacent partitions.",
+  "interleaving_trigger": "G1 appends to buf[:1] overwriting buf[1] while G2 reads/writes buf[1:2]."
+}

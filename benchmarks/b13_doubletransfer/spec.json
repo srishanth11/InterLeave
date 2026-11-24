@@ -1,0 +1,9 @@
+{
+  "id": "B13",
+  "category": "Atomicity Violation",
+  "scenario": "Cross-Object Split-Lock Conservation Violation",
+  "detected_by_race": false,
+  "rely": "No concurrent Transfer(a, b, amt) is in the window between src.Withdraw and dst.Deposit while CallerAuditConservation reads balances.",
+  "guarantee": "a.Balance() + b.Balance() equals initial total capital.",
+  "interleaving_trigger": "G1 calls Transfer(a, b, 100) and finishes a.Withdraw(100); G2 runs CallerAuditConservation(a, b) before b.Deposit(100) executes, observing missing funds."
+}

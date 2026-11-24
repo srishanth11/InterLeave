@@ -1,0 +1,9 @@
+{
+  "id": "B05",
+  "category": "TOCTOU Race / Channel Lifecycle",
+  "scenario": "Channel-Close Send Panic",
+  "detected_by_race": false,
+  "rely": "Other goroutines do not call Shutdown() and close b.ch between b.closed.Load() and b.ch <- msg.",
+  "guarantee": "Publish safely returns false if shutting down and never panics.",
+  "interleaving_trigger": "G1 passes b.closed.Load() == false; G2 executes Shutdown() closing b.ch; G1 executes b.ch <- msg."
+}

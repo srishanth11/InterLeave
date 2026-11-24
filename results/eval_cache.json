@@ -1,0 +1,1713 @@
+{
+  "impl_only": {
+    "b01_bank": true,
+    "b02_seat": true,
+    "b03_counter": true,
+    "b04_deadlock": true,
+    "b05_chanclose": true,
+    "b06_rwupgrade": true,
+    "b07_condlost": true,
+    "b08_dclinit": true,
+    "b09_crosslock": true,
+    "b10_waitgroup": true,
+    "b11_ctxleak": true,
+    "b12_slicealias": true,
+    "b13_doubletransfer": true,
+    "b14_poolpoison": true,
+    "b15_oncefallback": true,
+    "b16_subpubrace": true,
+    "b17_timerreset": true,
+    "b18_nestedrw": true,
+    "c01_safebank": false,
+    "c02_safepool": false,
+    "c03_epochcommit": true,
+    "c04_actorloop": false,
+    "c05_cowatomic": false,
+    "c06_semctx": false,
+    "c07_lockedhelper": false,
+    "c08_confinedworker": false
+  },
+  "interleave_guard": {
+    "b01_bank": {
+      "package": "b01_bank",
+      "ground_truth": "BUGGY",
+      "final_detected": true,
+      "specs": {
+        "CallerATMWithdraw": {
+          "precondition": "a != nil && amt >= 0",
+          "postcondition": "returns true if withdrawal successful and balance reduced by amt, false otherwise",
+          "rely": "true",
+          "guarantee": "true",
+          "expected_callees": {
+            "ProcessWithdraw": "atomically checks balance and deducts if sufficient"
+          }
+        },
+        "ProcessWithdraw": {
+          "precondition": "a != nil && amt >= 0",
+          "postcondition": "returns true if a.balance >= amt and deducted, false otherwise",
+          "rely": "true",
+          "guarantee": "true",
+          "expected_callees": {
+            "GetBalance": "returns current balance safely under lock",
+            "Deduct": "deducts amount safely under lock"
+          }
+        },
+        "GetBalance": {
+          "precondition": "a != nil",
+          "postcondition": "returns current balance while holding a.mu",
+          "rely": "true",
+          "guarantee": "preserves mutex protection and returns exact balance",
+          "expected_callees": {}
+        },
+        "Deduct": {
+          "precondition": "a != nil && amt >= 0",
+          "postcondition": "a.balance' == a.balance - amt while holding a.mu",
+          "rely": "true",
+          "guarantee": "preserves mutex protection and correctly subtracts amount from balance",
+          "expected_callees": {}
+        }
+      },
+      "analysis": {
+        "vulnerable": true,
+        "bug_category": "Atomicity Violation",
+        "violated_contract": "ProcessWithdraw expects check-then-act (GetBalance followed by Deduct) to be atomic, but individual method calls release and re-acquire the lock, creating a split-lock race condition.",
+        "interleaving_schedule": [
+          {
+            "step": 1,
+            "goroutine": "G1",
+            "action": "ProcessWithdraw calls a.GetBalance(); acquires mu, reads balance = 100, releases mu."
+          },
+          {
+            "step": 2,
+            "goroutine": "G2",
+            "action": "ProcessWithdraw calls a.Deduct(100); acquires mu, deducts 100, balance becomes 0, releases mu."
+          },
+          {
+            "step": 3,
+            "goroutine": "G1",
+            "action": "Resumes ProcessWithdraw with stored balance 100 >= amt (100). Calls a.Deduct(100), balance becomes -100 (overdraws)."
+          }
+        ],
+        "test_strategy": "Spawn two concurrent goroutines calling ProcessWithdraw(account, 60) on an account with initial balance 100. Assert that exactly one succeeds and the final balance is 40, not -20.",
+        "repair_suggestion": "Add a Withdraw method on Account that holds the mutex continuously across the check and deduction:\nfunc (a *Account) Withdraw(amt int) bool {\n\ta.mu.Lock()\n\tdefer a.mu.Unlock()\n\tif a.balance >= amt {\n\t\ta.balance -= amt\n\t\treturn true\n\t}\n\treturn false\n}"
+      },
+      "test_execution": {
+        "package": "b01_bank",
+        "compiled": true,
+        "bug_witnessed_by_test": false,
+        "llm_predicted_vulnerable": true,
+        "test_exit_code": 1,
+        "test_output": "FAIL\tinterleaveguard/benchmarks/b01_bank [setup failed]\nFAIL\n\n# interleaveguard/benchmarks/b01_bank\nb01_bank/interleaveguard_gen_test.go:5:12: expected ')', found 'EOF'",
+        "generated_test_code": "package b01_bank\n\nimport (\n\t\"sync\"\n\t\"testing\"",
+        "token_stats": {
+          "prompt": 3308,
+          "completion": 992,
+          "calls": 3
+        }
+      }
+    },
+    "b02_seat": {
+      "package": "b02_seat",
+      "ground_truth": "BUGGY",
+      "final_detected": true,
+      "specs": {
+        "CallerCheckoutSeat": {
+          "precondition": "s != nil and valid seat id",
+          "postcondition": "returns true if seat was successfully reserved, false otherwise",
+          "rely": "Other goroutines may attempt concurrent reservations",
+          "guarantee": "Maintains valid SeatMap state across calls",
+          "expected_callees": {
+            "Reserve": "Atomically checks and reserves the seat if free"
+          }
+        },
+        "Reserve": {
+          "precondition": "s != nil and valid seat id",
+          "postcondition": "seat is booked if it was free, returning success status",
+          "rely": "Other goroutines may modify seat status concurrently",
+          "guarantee": "Does not corrupt seat map structure",
+          "expected_callees": {
+            "IsFree": "Atomically checks if the seat is currently unbooked",
+            "Book": "Atomically assigns the seat to the given passenger"
+          }
+        },
+        "IsFree": {
+          "precondition": "s != nil and mutex is unlocked",
+          "postcondition": "returns true if the seat has no assigned passenger, false otherwise",
+          "rely": "Other goroutines may hold the lock briefly",
+          "guarantee": "Locks and unlocks s.mu properly, ensuring thread-safe map read",
+          "expected_callees": {}
+        },
+        "Book": {
+          "precondition": "s != nil and mutex is unlocked",
+          "postcondition": "seat is mapped to the passenger in s.seats",
+          "rely": "Other goroutines may hold the lock briefly",
+          "guarantee": "Locks and unlocks s.mu properly, ensuring thread-safe map write",
+          "expected_callees": {}
+        }
+      },
+      "analysis": {
+        "vulnerable": true,
+        "bug_category": "Atomicity Violation",
+        "violated_contract": "Reserve expects IsFree and Book to act as a single atomic compound operation, but the mutex is released between IsFree and Book, leading to a check-then-act race gap.",
+        "interleaving_schedule": [
+          {
+            "step": 1,
+            "goroutine": "G1",
+            "action": "CallerCheckoutSeat calls Reserve(s, 1, \"Alice\"), which calls s.IsFree(1). G1 acquires s.mu, finds seat 1 free, and releases s.mu."
+          },
+          {
+            "step": 2,
+            "goroutine": "G2",
+            "action": "Concurrent goroutine G2 calls Reserve(s, 1, \"Bob\"). G2 acquires s.mu, finds seat 1 free, books it for \"Bob\", and releases s.mu."
+          },
+          {
+            "step": 3,
+            "goroutine": "G1",
+            "action": "G1 resumes Reserve, proceeds to s.Book(1, \"Alice\"), acquiring s.mu and overwriting Bob's reservation with Alice's without re-verifying if the seat is still free."
+          }
+        ],
+        "test_strategy": "Spawn two goroutines concurrently calling CallerCheckoutSeat for the same seat using sync.WaitGroup and a start gate channel. Assert that exactly one reservation succeeds (returns true) and the other fails (returns false), and verify that only one passenger's name is stored in the SeatMap.",
+        "repair_suggestion": "Introduce an atomic Reserve method that holds the mutex across both the check and the write:\n\nfunc (s *SeatMap) Reserve(seat int, passenger string) bool {\n\ts.mu.Lock()\n\tdefer s.mu.Unlock()\n\tif _, taken := s.seats[seat]; taken {\n\t\treturn false\n\t}\n\ts.seats[seat] = passenger\n\treturn true\n}"
+      },
+      "test_execution": {
+        "package": "b02_seat",
+        "compiled": true,
+        "bug_witnessed_by_test": true,
+        "llm_predicted_vulnerable": true,
+        "test_exit_code": 1,
+        "test_output": "--- FAIL: TestInterleaveGuardAudit (0.00s)\n    interleaveguard_gen_test.go:45: Atomicity violation detected: both Alice and Bob successfully reserved seat 101 in iteration 42\nFAIL\nFAIL\tinterleaveguard/benchmarks/b02_seat\t0.504s\nFAIL",
+        "generated_test_code": "package b02_seat\n\nimport (\n\t\"sync\"\n\t\"testing\"\n)\n\nfunc TestInterleaveGuardAudit(t *testing.T) {\n\tconst seatID = 101\n\titerations := 100\n\n\tfor i := 0; i < iterations; i++ {\n\t\tsm := NewSeatMap()\n\t\tstartGate := make(chan struct{})\n\t\tvar wg sync.WaitGroup\n\t\twg.Add(2)\n\n\t\tvar successCount int\n\t\tvar mu sync.Mutex\n\n\t\tgo func() {\n\t\t\tdefer wg.Done()\n\t\t\t<-startGate\n\t\t\tif CallerCheckoutSeat(sm, seatID, \"Alice\") {\n\t\t\t\tmu.Lock()\n\t\t\t\tsuccessCount++\n\t\t\t\tmu.Unlock()\n\t\t\t}\n\t\t}()\n\n\t\tgo func() {\n\t\t\tdefer wg.Done()\n\t\t\t<-startGate\n\t\t\tif CallerCheckoutSeat(sm, seatID, \"Bob\") {\n\t\t\t\tmu.Lock()\n\t\t\t\tsuccessCount++\n\t\t\t\tmu.Unlock()\n\t\t\t}\n\t\t}()\n\n\t\tclose(startGate)\n\t\twg.Wait()\n\n\t\tif successCount > 1 {\n\t\t\tt.Fatalf(\"Atomicity violation detected: both Alice and Bob successfully reserved seat %d in iteration %d\", seatID, i)\n\t\t}\n\t}\n}",
+        "token_stats": {
+          "prompt": 6828,
+          "completion": 2132,
+          "calls": 6
+        }
+      }
+    },
+    "b03_counter": {
+      "package": "b03_counter",
+      "ground_truth": "BUGGY",
+      "final_detected": true,
+      "specs": {
+        "CallerRecordPageView": {
+          "precondition": "c is non-nil and initialized",
+          "postcondition": "returns the incremented count value",
+          "rely": "no external modification of c.count outside of c.mu",
+          "guarantee": "c.count is incremented by 1 relative to the state before the call",
+          "expected_callees": {
+            "Increment": "atomically increments c.count",
+            "Get": "returns the current value of c.count"
+          }
+        },
+        "Increment": {
+          "precondition": "c is non-nil",
+          "postcondition": "c.count is incremented by 1",
+          "rely": "no external modification of c.count outside of c.mu",
+          "guarantee": "c.count increases by exactly 1",
+          "expected_callees": {
+            "Get": "returns the current value of c.count",
+            "Set": "updates c.count to the provided value"
+          }
+        },
+        "Get": {
+          "precondition": "c is non-nil",
+          "postcondition": "returns the current value of c.count",
+          "rely": "c.mu protects access to c.count",
+          "guarantee": "c.count remains unchanged",
+          "expected_callees": {}
+        },
+        "Set": {
+          "precondition": "c is non-nil",
+          "postcondition": "c.count is updated to val",
+          "rely": "c.mu protects access to c.count",
+          "guarantee": "c.count is set to the provided argument",
+          "expected_callees": {}
+        }
+      },
+      "analysis": {
+        "vulnerable": true,
+        "bug_category": "Atomicity Violation",
+        "violated_contract": "Increment expects to atomically increment c.count, but releases and re-acquires c.mu between Get() and Set(), creating a check-then-act race condition.",
+        "interleaving_schedule": [
+          {
+            "step": 1,
+            "goroutine": "G1",
+            "action": "Calls Increment(c), which calls c.Get(). G1 locks c.mu, reads c.count (e.g., 0), unlocks c.mu."
+          },
+          {
+            "step": 2,
+            "goroutine": "G2",
+            "action": "Calls Increment(c). G2 locks c.mu, reads c.count (0), sets c.count to 1, unlocks c.mu."
+          },
+          {
+            "step": 3,
+            "goroutine": "G1",
+            "action": "Resumes Increment(c), calls c.Set(curr + 1) where curr was 0. G1 sets c.count to 1, overwriting G2's update."
+          }
+        ],
+        "test_strategy": "Launch 100 concurrent goroutines calling Increment(c) on a shared HitsCounter initialized to 0. Assert that c.Get() equals 100 at the end. Without the fix, the final count will be less than 100 due to lost updates.",
+        "repair_suggestion": "Combine Get and Set into a single method protected by one critical section, or add a method: func (c *HitsCounter) Increment() { c.mu.Lock(); defer c.mu.Unlock(); c.count++ }"
+      },
+      "test_execution": {
+        "package": "b03_counter",
+        "compiled": true,
+        "bug_witnessed_by_test": true,
+        "llm_predicted_vulnerable": true,
+        "test_exit_code": 1,
+        "test_output": "--- FAIL: TestInterleaveGuardAudit (0.00s)\n    interleaveguard_gen_test.go:33: Atomicity violation detected: expected final count 100, got 47 (iteration 0)\nFAIL\nFAIL\tinterleaveguard/benchmarks/b03_counter\t0.388s\nFAIL",
+        "generated_test_code": "package b03_counter\n\nimport (\n\t\"sync\"\n\t\"testing\"\n)\n\nfunc TestInterleaveGuardAudit(t *testing.T) {\n\tconst numGoroutines = 100\n\n\tfor i := 0; i < 50; i++ {\n\t\tcounter := &HitsCounter{}\n\t\tcounter.Set(0)\n\n\t\tvar wg sync.WaitGroup\n\t\twg.Add(numGoroutines)\n\n\t\tstart := make(chan struct{})\n\n\t\tfor g := 0; g < numGoroutines; g++ {\n\t\t\tgo func() {\n\t\t\t\tdefer wg.Done()\n\t\t\t\t<-start\n\t\t\t\tIncrement(counter)\n\t\t\t}()\n\t\t}\n\n\t\tclose(start)\n\t\twg.Wait()\n\n\t\tfinalCount := counter.Get()\n\t\tif finalCount != numGoroutines {\n\t\t\tt.Fatalf(\"Atomicity violation detected: expected final count %d, got %d (iteration %d)\", numGoroutines, finalCount, i)\n\t\t}\n\t}\n}",
+        "token_stats": {
+          "prompt": 10003,
+          "completion": 3155,
+          "calls": 9
+        }
+      }
+    },
+    "b04_deadlock": {
+      "package": "b04_deadlock",
+      "ground_truth": "BUGGY",
+      "final_detected": true,
+      "specs": {
+        "CallerPeerPayment": {
+          "precondition": "sender != nil && receiver != nil && amt >= 0",
+          "postcondition": "returns true if transfer succeeded and balances updated, false otherwise",
+          "rely": "other goroutines do not invalidate sender or receiver pointers",
+          "guarantee": "preserves consistency of sender and receiver wallets",
+          "expected_callees": {
+            "Transfer": "safely transfers amount between wallets with proper lock acquisition"
+          }
+        },
+        "Transfer": {
+          "precondition": "from != nil && to != nil && amt >= 0 && from != to",
+          "postcondition": "if from.balance >= amt, balances updated and returns true; otherwise returns false",
+          "rely": "other goroutines do not concurrently lock from.mu or to.mu in a conflicting order to avoid deadlocks",
+          "guarantee": "acquires locks correctly, prevents negative balances, and preserves total sum of balances atomically",
+          "expected_callees": {}
+        }
+      },
+      "analysis": {
+        "vulnerable": true,
+        "bug_category": "Deadlock",
+        "violated_contract": "Transfer relies on other goroutines not locking in a conflicting order, but the implementation lacks a global lock ordering strategy (e.g., sorting by memory address).",
+        "interleaving_schedule": [
+          {
+            "step": 1,
+            "goroutine": "G1",
+            "action": "Transfer(walletA, walletB, 10) calls walletA.mu.Lock()"
+          },
+          {
+            "step": 2,
+            "goroutine": "G2",
+            "action": "Transfer(walletB, walletA, 10) calls walletB.mu.Lock()"
+          },
+          {
+            "step": 3,
+            "goroutine": "G1",
+            "action": "Attempts to call walletB.mu.Lock() and blocks"
+          },
+          {
+            "step": 4,
+            "goroutine": "G2",
+            "action": "Attempts to call walletA.mu.Lock() and blocks (Deadlock)"
+          }
+        ],
+        "test_strategy": "Create two wallets A and B. Launch two goroutines: G1 calls Transfer(A, B, 10) and G2 calls Transfer(B, A, 10) in a tight loop. Use a timeout context or a watchdog timer to detect if the execution hangs indefinitely.",
+        "repair_suggestion": "Implement lock ordering based on memory addresses: if uintptr(unsafe.Pointer(from)) < uintptr(unsafe.Pointer(to)) { from.mu.Lock(); to.mu.Lock() } else { to.mu.Lock(); from.mu.Lock() }"
+      },
+      "test_execution": {
+        "package": "b04_deadlock",
+        "compiled": true,
+        "bug_witnessed_by_test": false,
+        "llm_predicted_vulnerable": true,
+        "test_exit_code": 1,
+        "test_output": "FAIL\tinterleaveguard/benchmarks/b04_deadlock [setup failed]\nFAIL\n\n# interleaveguard/benchmarks/b04_deadlock\nb04_deadlock/interleaveguard_gen_test.go:9:25: expected '(', found newline",
+        "generated_test_code": "package b04_deadlock\n\nimport (\n\t\"context\"\n\t\"testing\"\n\t\"time\"\n)\n\nfunc TestInterleaveGuard",
+        "token_stats": {
+          "prompt": 12671,
+          "completion": 4145,
+          "calls": 12
+        }
+      }
+    },
+    "b05_chanclose": {
+      "package": "b05_chanclose",
+      "ground_truth": "BUGGY",
+      "final_detected": true,
+      "specs": {
+        "Shutdown": {
+          "precondition": "b.once is initialized and b.closed is false",
+          "postcondition": "b.closed is true and b.ch is closed",
+          "rely": "No other goroutine calls Shutdown or closes b.ch",
+          "guarantee": "b.closed remains true and b.ch remains closed once set",
+          "expected_callees": {}
+        },
+        "CallerAuditLog": {
+          "precondition": "bus is non-nil and initialized",
+          "postcondition": "returned int equals count of successfully published events",
+          "rely": "No other goroutine modifies bus.closed or bus.ch in a way that violates channel safety",
+          "guarantee": "Does not modify bus state directly, only via Publish",
+          "expected_callees": {
+            "Publish": "Returns false if bus is closed, true otherwise, without panicking"
+          }
+        },
+        "Publish": {
+          "precondition": "bus is initialized",
+          "postcondition": "if true returned, msg is sent; if false returned, msg is dropped",
+          "rely": "b.ch is not closed by any other goroutine while Publish is executing",
+          "guarantee": "Does not send on a closed channel",
+          "expected_callees": {}
+        }
+      },
+      "analysis": {
+        "vulnerable": true,
+        "bug_category": "Atomicity Violation",
+        "violated_contract": "Publish relies on b.ch not being closed while executing, but the check-then-act gap between b.closed.Load() and b.ch <- msg allows a concurrent Shutdown to close the channel, causing a panic.",
+        "interleaving_schedule": [
+          {
+            "step": 1,
+            "goroutine": "G1 (Publish)",
+            "action": "b.closed.Load() returns false"
+          },
+          {
+            "step": 2,
+            "goroutine": "G2 (Shutdown)",
+            "action": "b.once.Do executes, sets b.closed=true, and closes b.ch"
+          },
+          {
+            "step": 3,
+            "goroutine": "G1 (Publish)",
+            "action": "b.ch <- msg executes on a closed channel, causing a panic"
+          }
+        ],
+        "test_strategy": "Use a loop with two goroutines: one calling Publish repeatedly and another calling Shutdown. Use a sync.WaitGroup to ensure both start simultaneously. Wrap the Publish call in a recover() block to detect the panic triggered by sending on a closed channel.",
+        "repair_suggestion": "The channel cannot be safely protected by an atomic bool alone because the channel operation is not atomic with the check. Use a sync.RWMutex to protect the channel send and the closed state, or use a select statement with a 'done' channel to signal shutdown instead of closing the data channel."
+      },
+      "test_execution": {
+        "package": "b05_chanclose",
+        "compiled": true,
+        "bug_witnessed_by_test": false,
+        "llm_predicted_vulnerable": true,
+        "test_exit_code": 1,
+        "test_output": "FAIL\tinterleaveguard/benchmarks/b05_chanclose [setup failed]\nFAIL\n\n# interleaveguard/benchmarks/b05_chanclose\nfound packages b05_chanclose (baseline_test.go) and b (interleaveguard_gen_test.go) in /Users/deepikaparimi/interleave-guard/benchmarks/b05_chanclose",
+        "generated_test_code": "package b",
+        "token_stats": {
+          "prompt": 15734,
+          "completion": 5002,
+          "calls": 15
+        }
+      }
+    },
+    "b06_rwupgrade": {
+      "package": "b06_rwupgrade",
+      "ground_truth": "BUGGY",
+      "final_detected": true,
+      "specs": {
+        "PushUpdate": {
+          "precondition": "c != nil and c.store != nil and locks are unlocked",
+          "postcondition": "c.store.data[key] == val and key is deleted from c.entries",
+          "rely": "Other threads may attempt to read or write c.store.data or c.entries using proper mutex protection",
+          "guarantee": "Updates c.store.data and invalidates c.entries atomically under both mutexes",
+          "expected_callees": {}
+        },
+        "CallerFetchFeatureFlag": {
+          "precondition": "cache != nil and cache.store != nil",
+          "postcondition": "Returns the string value associated with key",
+          "rely": "Other threads access cache and store via defined locking disciplines",
+          "guarantee": "Correctly forwards call to cache.GetOrRefresh",
+          "expected_callees": {
+            "GetOrRefresh": "Returns the value for the given key, updating cache if necessary"
+          }
+        },
+        "GetOrRefresh": {
+          "precondition": "c != nil and c.store != nil",
+          "postcondition": "Returns value for key, ensuring c.entries[key] is populated",
+          "rely": "Other threads may modify c.entries or c.store.data only while holding the respective mutexes",
+          "guarantee": "Does not violate thread safety of c.mu and c.store.mu, updates cache correctly on miss",
+          "expected_callees": {}
+        }
+      },
+      "analysis": {
+        "vulnerable": true,
+        "bug_category": "Deadlock",
+        "violated_contract": "Inconsistent lock acquisition order between GetOrRefresh and PushUpdate",
+        "interleaving_schedule": [
+          {
+            "step": 1,
+            "goroutine": "G1",
+            "action": "Caller calls GetOrRefresh(key), acquires c.mu (line 25)"
+          },
+          {
+            "step": 2,
+            "goroutine": "G2",
+            "action": "Caller calls PushUpdate(key, val), acquires c.store.mu (line 42)"
+          },
+          {
+            "step": 3,
+            "goroutine": "G1",
+            "action": "G1 attempts to acquire c.store.mu (line 31) and blocks waiting for G2"
+          },
+          {
+            "step": 4,
+            "goroutine": "G2",
+            "action": "G2 attempts to acquire c.mu (line 45) and blocks waiting for G1, resulting in a classic lock-ordering deadlock"
+          }
+        ],
+        "test_strategy": "Create two goroutines: G1 continuously calling GetOrRefresh and G2 continuously calling PushUpdate with overlapping keys. Run under a timeout test using `go test -race` to observe the deadlock.",
+        "repair_suggestion": "Ensure a consistent lock acquisition order across all methods. For example, always acquire c.mu before c.store.mu in both GetOrRefresh and PushUpdate, or redesign the locking hierarchy so that nested locks are avoided."
+      },
+      "test_execution": {
+        "package": "b06_rwupgrade",
+        "compiled": true,
+        "bug_witnessed_by_test": false,
+        "llm_predicted_vulnerable": true,
+        "test_exit_code": 1,
+        "test_output": "FAIL\tinterleaveguard/benchmarks/b06_rwupgrade [setup failed]\nFAIL\n\n# interleaveguard/benchmarks/b06_rwupgrade\nb06_rwupgrade/interleaveguard_gen_test.go:12:37: expected '}', found 'EOF'",
+        "generated_test_code": "package b06_rwupgrade\n\nimport (\n\t\"context\"\n\t\"testing\"\n\t\"time\"\n)\n\nfunc TestInterleaveGuardAudit(t *testing.T) {\n\tcache := NewConfigCache()\n\n\tctx, cancel := context.WithTimeout",
+        "token_stats": {
+          "prompt": 19448,
+          "completion": 6005,
+          "calls": 18
+        }
+      }
+    },
+    "b07_condlost": {
+      "package": "b07_condlost",
+      "ground_truth": "BUGGY",
+      "final_detected": true,
+      "specs": {
+        "CallerProcessBatch": {
+          "precondition": "q != nil and q.mu and q.cond are properly initialized",
+          "postcondition": "The task has been enqueued and subsequently dequeued, returning the processed item",
+          "rely": "Other threads interact with q via standard mutex-protected operations",
+          "guarantee": "Executes Enqueue and Dequeue to process the task safely",
+          "expected_callees": {
+            "Enqueue": "Appends item to queue and signals condition under lock",
+            "Dequeue": "Waits if empty, then pops and returns the first item"
+          }
+        },
+        "Enqueue": {
+          "precondition": "q != nil",
+          "postcondition": "item is appended to q.items and q.cond.Signal() is called",
+          "rely": "Other threads do not corrupt q.items or q.mu without holding the lock",
+          "guarantee": "Protects q.items modification with q.mu and signals waiting threads",
+          "expected_callees": {}
+        },
+        "Dequeue": {
+          "precondition": "q != nil",
+          "postcondition": "Returns the first item from q.items, removing it from the queue",
+          "rely": "Other threads acquire q.mu when modifying q.items",
+          "guarantee": "Maintains mutex protection and correctly waits on condition if q.items is empty",
+          "expected_callees": {}
+        }
+      },
+      "analysis": {
+        "vulnerable": true,
+        "bug_category": "Condition Variable Bug",
+        "violated_contract": "Dequeue uses 'if len(q.items) == 0' instead of a 'for' loop for condition predicate checking, leading to lost wakeups and spurious wakeups.",
+        "interleaving_schedule": [
+          {
+            "step": 1,
+            "goroutine": "G1 (Dequeue)",
+            "action": "Acquires q.mu, checks len(q.items) == 0 (true), and calls q.cond.Wait() which releases the lock and blocks."
+          },
+          {
+            "step": 2,
+            "goroutine": "G2 (Enqueue)",
+            "action": "Acquires q.mu, appends an item, releases q.mu, and calls q.cond.Signal(). G1 is woken up."
+          },
+          {
+            "step": 3,
+            "goroutine": "G3 (Dequeue)",
+            "action": "Intervenes before G1 reacquires the lock or finishes, calls Dequeue, acquires q.mu, consumes the item from q.items, and releases q.mu."
+          },
+          {
+            "step": 4,
+            "goroutine": "G1 (Dequeue)",
+            "action": "Reacquires q.mu after being signaled, but proceeds directly to access q.items[0] without re-checking the condition. Since G3 already took the item, q.items is empty again, causing a panic (index out of range) or returning an incorrect value."
+          }
+        ],
+        "test_strategy": "Create multiple producer and consumer goroutines sharing a TaskQueue instance with an empty initial state. Concurrently push and pop items repeatedly to induce spurious/competing wakeups, asserting that Dequeue never panics and correctly retrieves items without violating queue invariants.",
+        "repair_suggestion": "Replace the 'if' statement in Dequeue with a 'for' loop to re-check the predicate upon waking up: \n\nfunc (q *TaskQueue) Dequeue() int {\n\tq.mu.Lock()\n\tdefer q.mu.Unlock()\n\tfor len(q.items) == 0 {\n\t\tq.cond.Wait()\n\t}\n\titem := q.items[0]\n\tq.items = q.items[1:]\n\treturn item\n}"
+      },
+      "test_execution": {
+        "package": "b07_condlost",
+        "compiled": true,
+        "bug_witnessed_by_test": false,
+        "llm_predicted_vulnerable": true,
+        "test_exit_code": 0,
+        "test_output": "ok  \tinterleaveguard/benchmarks/b07_condlost\t1.469s",
+        "generated_test_code": "package b07_condlost\n\nimport (\n\t\"sync\"\n\t\"testing\"\n\t\"time\"\n)\n\nfunc TestInterleaveGuardAudit(t *testing.T) {\n\tfor i := 0; i < 100; i++ {\n\t\tq := NewTaskQueue()\n\t\tvar wg sync.WaitGroup\n\t\twg.Add(2)\n\n\t\tdone := make(chan struct{})\n\n\t\tgo func() {\n\t\t\tdefer wg.Done()\n\t\t\tq.Dequeue()\n\t\t}()\n\n\t\tgo func() {\n\t\t\tdefer wg.Done()\n\t\t\tq.Enqueue(42)\n\t\t\tq.Enqueue(43)\n\t\t}()\n\n\t\tgo func() {\n\t\t\twg.Wait()\n\t\t\tclose(done)\n\t\t}()\n\n\t\tselect {\n\t\tcase <-done:\n\t\tcase <-time.After(1 * time.Second):\n\t\t\tt.Fatalf(\"Test timed out, possible deadlock or hang due to condition variable bug\")\n\t\t}\n\t}\n}",
+        "token_stats": {
+          "prompt": 22938,
+          "completion": 7121,
+          "calls": 21
+        }
+      }
+    },
+    "b08_dclinit": {
+      "package": "b08_dclinit",
+      "ground_truth": "BUGGY",
+      "final_detected": true,
+      "specs": {
+        "CallerExecuteRPC": {
+          "precondition": "reg != nil",
+          "postcondition": "returns true if config is ready with valid endpoint and max retry, false otherwise",
+          "rely": "Concurrent modifications to reg.cfg and reg.mu adhere to Registry state consistency",
+          "guarantee": "Does not mutate Registry state",
+          "expected_callees": {
+            "GetConfig": "Returns a valid *ServiceConfig, safely initializing it if necessary"
+          }
+        },
+        "GetConfig": {
+          "precondition": "r != nil",
+          "postcondition": "returns a non-nil *ServiceConfig pointer with initialized fields",
+          "rely": "Other goroutines respect r.mu mutex when accessing or modifying r.cfg",
+          "guarantee": "Safely initializes r.cfg under mutex protection if nil, ensuring thread-safe double-checked locking/initialization",
+          "expected_callees": {}
+        }
+      },
+      "analysis": {
+        "vulnerable": true,
+        "bug_category": "Data Race",
+        "violated_contract": "Double-checked locking without proper memory barriers or full mutex protection (Check-then-act / data race on r.cfg)",
+        "interleaving_schedule": [
+          {
+            "step": 1,
+            "goroutine": "G1",
+            "action": "GetConfig checks r.cfg != nil without holding r.mu (line 17)"
+          },
+          {
+            "step": 2,
+            "goroutine": "G2",
+            "action": "GetConfig acquires r.mu.Lock() and initializes r.cfg (lines 20-27)"
+          },
+          {
+            "step": 3,
+            "goroutine": "G1",
+            "action": "G1 reads r.cfg fields or returns r.cfg while G2 was writing to it, causing an uncoordinated read-write data race on ServiceConfig fields."
+          }
+        ],
+        "test_strategy": "Run `go test -race` with multiple goroutines concurrently invoking `GetConfig()` on an uninitialized `Registry` instance to expose the data race on `r.cfg` and its fields.",
+        "repair_suggestion": "Remove the unsafe check outside the lock and use standard mutex protection or sync.Once for initialization: \nfunc (r *Registry) GetConfig() *ServiceConfig {\n\tr.mu.Lock()\n\tdefer r.mu.Unlock()\n\tif r.cfg == nil {\n\t\tr.cfg = &ServiceConfig{\n\t\t\tEndpoint: \"https://api.internal:8443\",\n\t\t\tMaxRetry: 3,\n\t\t\tReady:    true,\n\t\t}\n\t}\n\treturn r.cfg\n}"
+      },
+      "test_execution": {
+        "package": "b08_dclinit",
+        "compiled": true,
+        "bug_witnessed_by_test": true,
+        "llm_predicted_vulnerable": true,
+        "test_exit_code": 1,
+        "test_output": "==================\nWARNING: DATA RACE\nWrite at 0x00c000122308 by goroutine 11:\n  interleaveguard/benchmarks/b08_dclinit.(*Registry).GetConfig()\n      /Users/deepikaparimi/interleave-guard/benchmarks/b08_dclinit/target.go:23 +0xdc\n  interleaveguard/benchmarks/b08_dclinit.CallerExecuteRPC()\n      /Users/deepikaparimi/interleave-guard/benchmarks/b08_dclinit/target.go:32 +0x80\n  interleaveguard/benchmarks/b08_dclinit.TestInterleaveGuardAudit.func1()\n      /Users/deepikaparimi/interleave-guard/benchmarks/b08_dclinit/interleaveguard_gen_test.go:20 +0x78\n\nPrevious read at 0x00c000122308 by goroutine 15:\n  interleaveguard/benchmarks/b08_dclinit.(*Registry).GetConfig()\n      /Users/deepikaparimi/interleave-guard/benchmarks/b08_dclinit/target.go:17 +0x38\n  interleaveguard/benchmarks/b08_dclinit.CallerExecuteRPC()\n      /Users/deepikaparimi/interleave-guard/benchmarks/b08_dclinit/target.go:32 +0x80\n  interleaveguard/benchmarks/b08_dclinit.TestInterleaveGuardAudit.func1()\n      /Users/deepikaparimi/interleave-guard/benchmarks/b08_dclinit/interleaveguard_gen_test.go:20 +0x78\n\nGoroutine 11 (running) created at:\n  interleaveguard/benchmarks/b08_dclinit.TestInterleaveGuardAudit()\n      /Users/deepikaparimi/interleave-guard/benchmarks/b08_dclinit/interleaveguard_gen_test.go:17 +0xc8\n  testing.tRunner()\n      /opt/homebrew/Cellar/go/1.27.4/libexec/src/testing/testing.go:2195 +0x164\n  testing.(*T).Run.gowrap1()\n      /opt/homebrew/Cellar/go/1.27.4/libexec/src/testing/testing.go:2260 +0x34\n\nGoro",
+        "generated_test_code": "package b08_dclinit\n\nimport (\n\t\"sync\"\n\t\"testing\"\n)\n\nfunc TestInterleaveGuardAudit(t *testing.T) {\n\tfor i := 0; i < 50; i++ {\n\t\treg := &Registry{}\n\t\tvar wg sync.WaitGroup\n\t\tstart := make(chan struct{})\n\n\t\tnumGoroutines := 10\n\t\tfor j := 0; j < numGoroutines; j++ {\n\t\t\twg.Add(1)\n\t\t\tgo func() {\n\t\t\t\tdefer wg.Done()\n\t\t\t\t<-start\n\t\t\t\t_ = CallerExecuteRPC(reg)\n\t\t\t}()\n\t\t}\n\n\t\tclose(start)\n\t\twg.Wait()\n\t}\n}",
+        "token_stats": {
+          "prompt": 25679,
+          "completion": 7935,
+          "calls": 24
+        }
+      }
+    },
+    "b09_crosslock": {
+      "package": "b09_crosslock",
+      "ground_truth": "BUGGY",
+      "final_detected": true,
+      "specs": {
+        "Rebalance": {
+          "precondition": "src.stock >= qty && src != dst",
+          "postcondition": "src.stock_old = src.stock + qty && dst.stock_old = dst.stock - qty",
+          "rely": "No other goroutine modifies src.stock or dst.stock outside of Add()",
+          "guarantee": "The sum of src.stock + dst.stock remains invariant across the operation",
+          "expected_callees": {
+            "Add": "Atomically updates stock by qty without violating internal mutex invariants"
+          }
+        },
+        "CallerAuditInventory": {
+          "precondition": "w1 != nil && w2 != nil",
+          "postcondition": "result = w1.stock + w2.stock",
+          "rely": "No other goroutine modifies w1.stock or w2.stock during the audit",
+          "guarantee": "Does not modify the state of w1 or w2",
+          "expected_callees": {
+            "Count": "Atomically returns the current stock value"
+          }
+        },
+        "Add": {
+          "precondition": "w != nil",
+          "postcondition": "w.stock = w.stock_old + n",
+          "rely": "No other goroutine accesses w.stock without holding w.mu",
+          "guarantee": "w.mu is released and w.stock is updated atomically",
+          "expected_callees": {}
+        },
+        "Count": {
+          "precondition": "w != nil",
+          "postcondition": "result = w.stock",
+          "rely": "No other goroutine accesses w.stock without holding w.mu",
+          "guarantee": "w.mu is released and w.stock remains unchanged",
+          "expected_callees": {}
+        }
+      },
+      "analysis": {
+        "vulnerable": true,
+        "bug_category": "Atomicity Violation",
+        "violated_contract": "Rebalance updates src and dst in two separate lock/unlock critical sections, leaving an intermediate window where neither the sum invariant holds globally nor is the multi-warehouse transfer atomic.",
+        "interleaving_schedule": [
+          {
+            "step": 1,
+            "goroutine": "G1",
+            "action": "Rebalance(src, dst, 10) calls src.Add(-10), acquiring src.mu, decrementing src.stock, and releasing src.mu"
+          },
+          {
+            "step": 2,
+            "goroutine": "G2",
+            "action": "CallerAuditInventory(src, dst) executes src.Count() and dst.Count(), observing the intermediate state where src.stock is decremented before dst.stock is incremented, violating the guarantee that the sum remains invariant across the operation from an outside observer's perspective."
+          },
+          {
+            "step": 3,
+            "goroutine": "G1",
+            "action": "Rebalance calls dst.Add(10), acquiring dst.mu, incrementing dst.stock, and releasing dst.mu"
+          }
+        ],
+        "test_strategy": "Launch multiple goroutines concurrently invoking Rebalance and CallerAuditInventory on shared Warehouse instances. Assert that audited inventory sums do not match expected invariants due to split-lock atomicity violations.",
+        "repair_suggestion": "To make multi-warehouse transfers atomic, acquire locks in a consistent global order (e.g., ordered by memory address or ID) inside a higher-level transaction or transfer function, or protect multi-warehouse operations with a higher-level synchronization mechanism."
+      },
+      "test_execution": {
+        "package": "b09_crosslock",
+        "compiled": true,
+        "bug_witnessed_by_test": false,
+        "llm_predicted_vulnerable": true,
+        "test_exit_code": 1,
+        "test_output": "FAIL\tinterleaveguard/benchmarks/b09_crosslock [setup failed]\nFAIL\n\n# interleaveguard/benchmarks/b09_crosslock\nb09_crosslock/interleaveguard_gen_test.go:10:22: expected operand, found 'EOF'",
+        "generated_test_code": "package b09_crosslock\n\nimport (\n\t\"sync\"\n\t\"testing\"\n\t\"time\"\n)\n\nfunc TestInterleaveGuardAudit(t *testing.T) {\n\tfor iteration := 0;",
+        "token_stats": {
+          "prompt": 28943,
+          "completion": 9263,
+          "calls": 27
+        }
+      }
+    },
+    "b10_waitgroup": {
+      "package": "b10_waitgroup",
+      "ground_truth": "BUGGY",
+      "final_detected": true,
+      "specs": {
+        "CallerRunBatchJobs": {
+          "precondition": "true",
+          "postcondition": "res == 5",
+          "rely": "true",
+          "guarantee": "true",
+          "expected_callees": {
+            "SpawnAndCollect": "Spawns 5 concurrent tasks, waits for their completion, and returns the atomic counter value 5"
+          }
+        },
+        "SpawnAndCollect": {
+          "precondition": "n > 0",
+          "postcondition": "res == int32(n)",
+          "rely": "Concurrent goroutines only modify completed via atomic operations and properly synchronize via WaitGroup",
+          "guarantee": "Does not corrupt WaitGroup counters or atomic integers during concurrent execution",
+          "expected_callees": {}
+        }
+      },
+      "analysis": {
+        "vulnerable": true,
+        "bug_category": "WaitGroup Misuse",
+        "violated_contract": "SpawnAndCollect spawns goroutines where wg.Add(1) is called *inside* the spawned goroutine instead of *before* spawning it, leading to a race condition where wg.Wait() may return prematurely before all goroutines have actually started or completed.",
+        "interleaving_schedule": [
+          {
+            "step": 1,
+            "goroutine": "Main",
+            "action": "SpawnAndCollect calls go func() i=0"
+          },
+          {
+            "step": 2,
+            "goroutine": "Main",
+            "action": "SpawnAndCollect calls wg.Wait() before the spawned goroutine executes wg.Add(1)"
+          },
+          {
+            "step": 3,
+            "goroutine": "Main",
+            "action": "wg.Wait() returns immediately because WaitGroup counter is still 0"
+          },
+          {
+            "step": 4,
+            "goroutine": "Spawned",
+            "action": "Goroutine finally runs, calls wg.Add(1), but wg.Wait() has already unblocked"
+          }
+        ],
+        "test_strategy": "Call SpawnAndCollect(100) in a tight loop within a test; assert that completed.Load() equals 100 every time. Without the fix, wg.Wait() can return 0 or a value less than n because of the asynchronous race on wg.Add().",
+        "repair_suggestion": "Move wg.Add(1) outside and before the go func() call:\nfor i := 0; i < n; i++ {\n\twg.Add(1)\n\tgo func() {\n\t\tdefer wg.Done()\n\t\tcompleted.Add(1)\n\t}()\n}"
+      },
+      "test_execution": {
+        "package": "b10_waitgroup",
+        "compiled": true,
+        "bug_witnessed_by_test": true,
+        "llm_predicted_vulnerable": true,
+        "test_exit_code": 1,
+        "test_output": "==================\nWARNING: DATA RACE\nWrite at 0x00c0001141c8 by goroutine 7:\n  runtime.racewrite()\n      <autogenerated>:1 +0x10\n  interleaveguard/benchmarks/b10_waitgroup.TestInterleaveGuardAudit()\n      /Users/deepikaparimi/interleave-guard/benchmarks/b10_waitgroup/interleaveguard_gen_test.go:12 +0x44\n  testing.tRunner()\n      /opt/homebrew/Cellar/go/1.27.4/libexec/src/testing/testing.go:2195 +0x164\n  testing.(*T).Run.gowrap1()\n      /opt/homebrew/Cellar/go/1.27.4/libexec/src/testing/testing.go:2260 +0x34\n\nPrevious read at 0x00c0001141c8 by goroutine 26:\n  runtime.raceread()\n      <autogenerated>:1 +0x10\n\nGoroutine 7 (running) created at:\n  testing.(*T).Run()\n      /opt/homebrew/Cellar/go/1.27.4/libexec/src/testing/testing.go:2260 +0x7bc\n  testing.runTests.func1()\n      /opt/homebrew/Cellar/go/1.27.4/libexec/src/testing/testing.go:2744 +0x74\n  testing.tRunner()\n      /opt/homebrew/Cellar/go/1.27.4/libexec/src/testing/testing.go:2195 +0x164\n  testing.runTests()\n      /opt/homebrew/Cellar/go/1.27.4/libexec/src/testing/testing.go:2742 +0x7a0\n  testing.(*M).Run()\n      /opt/homebrew/Cellar/go/1.27.4/libexec/src/testing/testing.go:2602 +0xb38\n  main.main()\n      _testmain.go:48 +0x100\n\nGoroutine 26 (finished) created at:\n  interleaveguard/benchmarks/b10_waitgroup.SpawnAndCollect()\n      /Users/deepikaparimi/interleave-guard/benchmarks/b10_waitgroup/target.go:12 +0x70\n  interleaveguard/benchmarks/b10_waitgroup.TestInterleaveGuardAudit()\n      /Users/deepikaparimi/interleave-guar",
+        "generated_test_code": "package b10_waitgroup\n\nimport (\n\t\"testing\"\n)\n\nfunc TestInterleaveGuardAudit(t *testing.T) {\n\tn := 100\n\titerations := 50\n\n\tfor i := 0; i < iterations; i++ {\n\t\tcompleted := SpawnAndCollect(n)\n\t\tif completed != int32(n) {\n\t\t\tt.Fatalf(\"Concurrency invariant violated: expected %d completed jobs, but got %d (WaitGroup Misuse detected)\", n, completed)\n\t\t}\n\t}\n}",
+        "token_stats": {
+          "prompt": 31548,
+          "completion": 9966,
+          "calls": 30
+        }
+      }
+    },
+    "b11_ctxleak": {
+      "package": "b11_ctxleak",
+      "ground_truth": "BUGGY",
+      "final_detected": true,
+      "specs": {
+        "CallerQueryService": {
+          "precondition": "true",
+          "postcondition": "ok is returned reflecting whether FetchWithTimeout succeeded",
+          "rely": "true",
+          "guarantee": "true",
+          "expected_callees": {
+            "FetchWithTimeout": "Fetches with timeout, handles context cancellation properly, and avoids goroutine leaks on timeout"
+          }
+        },
+        "FetchWithTimeout": {
+          "precondition": "ctx is a valid context",
+          "postcondition": "returns string result and boolean success indicator, avoids blocking spawned goroutine indefinitely",
+          "rely": "other goroutines do not misuse w.mu",
+          "guarantee": "w.mu is locked and unlocked correctly within the spawned goroutine",
+          "expected_callees": {}
+        }
+      },
+      "analysis": {
+        "vulnerable": true,
+        "bug_category": "Goroutine Leak",
+        "violated_contract": "FetchWithTimeout avoids blocking spawned goroutine indefinitely when context times out or is cancelled",
+        "interleaving_schedule": [
+          {
+            "step": 1,
+            "goroutine": "G1 (CallerQueryService)",
+            "action": "Calls FetchWithTimeout with a context that immediately times out or gets cancelled (or simulate slow path where ctx.Done() fires first)."
+          },
+          {
+            "step": 2,
+            "goroutine": "G2 (Spawned background goroutine)",
+            "action": "Executes w.mu.Lock() and blocks waiting for the mutex (if held externally), or runs and attempts unbuffered resCh <- \"ok\" send."
+          },
+          {
+            "step": 3,
+            "goroutine": "G1 (FetchWithTimeout)",
+            "action": "select statement selects <-ctx.Done() because resCh is unbuffered and nobody is receiving from it yet, returning immediately and abandoning the spawned goroutine."
+          },
+          {
+            "step": 4,
+            "goroutine": "G2 (Spawned background goroutine)",
+            "action": "Attempts to send on resCh <- \"ok\", but since G1 has already returned and abandoned the channel, G2 blocks forever on the channel send, leaking the goroutine."
+          }
+        ],
+        "test_strategy": "Use runtime.NumGoroutine() before and after calling FetchWithTimeout with an already-cancelled context, asserting that the goroutine count returns to baseline after a short sleep/runtime.Gosched().",
+        "repair_suggestion": "Make resCh a buffered channel of size 1 (`resCh := make(chan string, 1)`), or use context-aware select inside the spawned goroutine when sending."
+      },
+      "test_execution": {
+        "package": "b11_ctxleak",
+        "compiled": true,
+        "bug_witnessed_by_test": false,
+        "llm_predicted_vulnerable": true,
+        "test_exit_code": 1,
+        "test_output": "FAIL\tinterleaveguard/benchmarks/b11_ctxleak [setup failed]\nFAIL\n\n# interleaveguard/benchmarks/b11_ctxleak\nb11_ctxleak/interleaveguard_gen_test.go:39:35: expected '}', found 'EOF'",
+        "generated_test_code": "package b11_ctxleak\n\nimport (\n\t\"context\"\n\t\"runtime\"\n\t\"sync\"\n\t\"testing\"\n\t\"time\"\n)\n\nfunc TestInterleaveGuardAudit(t *testing.T) {\n\tvar w Worker\n\n\t// Warm up runtime and get baseline goroutine count\n\truntime.Gosched()\n\tbaseline := runtime.NumGoroutine()\n\n\t// Run multiple iterations to reliably check for goroutine leaks caused by\n\t// abandoning the unbuffered channel send when context times out.\n\titerations := 50\n\tfor i := 0; i < iterations; i++ {\n\t\tctx, cancel := context.WithCancel(context.Background())\n\t\tcancel() // immediately cancelled context\n\n\t\tvar wg sync.WaitGroup\n\t\twg.Add(1)\n\t\tgo func() {\n\t\t\tdefer wg.Done()\n\t\t\t_, _ = w.FetchWithTimeout(ctx, true)\n\t\t}()\n\t\twg.Wait()\n\t}\n\n\t// Give any leaked goroutines a chance to surface\n\ttime.Sleep(10 * time.Millisecond)\n\truntime.Gosched()\n\n\tcurrent := runtime.NumGoroutine()\n\t// If the implementation leaks a",
+        "token_stats": {
+          "prompt": 34382,
+          "completion": 10907,
+          "calls": 33
+        }
+      }
+    },
+    "b12_slicealias": {
+      "package": "b12_slicealias",
+      "ground_truth": "BUGGY",
+      "final_detected": true,
+      "specs": {
+        "CallerSplitBuffer": {
+          "precondition": "true",
+          "postcondition": "data is a slice initialized with elements",
+          "rely": "true",
+          "guarantee": "true",
+          "expected_callees": {
+            "ProcessPartitions": "ProcessPartitions processes buffer partitions concurrently without violating memory safety"
+          }
+        },
+        "ProcessPartitions": {
+          "precondition": "buf has length >= 2",
+          "postcondition": "concurrent modifications to sliced parts complete and wait group finishes",
+          "rely": "true",
+          "guarantee": "Goroutines only modify their respective slice segments safely or synchronize via WaitGroup",
+          "expected_callees": {}
+        }
+      },
+      "analysis": {
+        "vulnerable": true,
+        "bug_category": "Data Race",
+        "violated_contract": "ProcessPartitions processes buffer partitions concurrently without violating memory safety",
+        "interleaving_schedule": [
+          {
+            "step": 1,
+            "goroutine": "G1 (CallerSplitBuffer)",
+            "action": "Calls ProcessPartitions(data) with data = []int{1, 2, 3}"
+          },
+          {
+            "step": 2,
+            "goroutine": "G2 (ProcessPartitions)",
+            "action": "Slices left := buf[:1] (len 1, cap 3) and right := buf[1:2] (len 1, cap 2)"
+          },
+          {
+            "step": 3,
+            "goroutine": "G3 (First goroutine)",
+            "action": "Executes left = append(left, 99). Since len(left) is 1 and capacity is 3, append writes 99 into buf[1], resizing the shared slice's length."
+          },
+          {
+            "step": 4,
+            "goroutine": "G4 (Second goroutine)",
+            "action": "Executes right[0] = 42. Concurrently writes to buf[1] (or adjacent memory depending on slicing), causing a data race on underlying memory elements."
+          }
+        ],
+        "test_strategy": "Run `go test -race` with a test function that repeatedly calls CallerSplitBuffer() concurrently across multiple goroutines to trigger the data race detector on the shared underlying array.",
+        "repair_suggestion": "Avoid slicing overlapping or shared underlying arrays without synchronization, or use distinct allocations / proper synchronization mutexes when modifying shared backing arrays."
+      },
+      "test_execution": {
+        "package": "b12_slicealias",
+        "compiled": true,
+        "bug_witnessed_by_test": true,
+        "llm_predicted_vulnerable": true,
+        "test_exit_code": 1,
+        "test_output": "==================\nWARNING: DATA RACE\nWrite at 0x00c000188008 by goroutine 26:\n  interleaveguard/benchmarks/b12_slicealias.ProcessPartitions.func1()\n      /Users/deepikaparimi/interleave-guard/benchmarks/b12_slicealias/target.go:12 +0xb8\n\nPrevious write at 0x00c000188008 by goroutine 32:\n  interleaveguard/benchmarks/b12_slicealias.ProcessPartitions.func2()\n      /Users/deepikaparimi/interleave-guard/benchmarks/b12_slicealias/target.go:16 +0x78\n\nGoroutine 26 (running) created at:\n  interleaveguard/benchmarks/b12_slicealias.ProcessPartitions()\n      /Users/deepikaparimi/interleave-guard/benchmarks/b12_slicealias/target.go:10 +0x148\n  interleaveguard/benchmarks/b12_slicealias.CallerSplitBuffer()\n      /Users/deepikaparimi/interleave-guard/benchmarks/b12_slicealias/target.go:23 +0xb0\n  interleaveguard/benchmarks/b12_slicealias.TestInterleaveGuardAudit.func1()\n      /Users/deepikaparimi/interleave-guard/benchmarks/b12_slicealias/interleaveguard_gen_test.go:16 +0x60\n\nGoroutine 32 (finished) created at:\n  interleaveguard/benchmarks/b12_slicealias.ProcessPartitions()\n      /Users/deepikaparimi/interleave-guard/benchmarks/b12_slicealias/target.go:14 +0x1f0\n  interleaveguard/benchmarks/b12_slicealias.CallerSplitBuffer()\n      /Users/deepikaparimi/interleave-guard/benchmarks/b12_slicealias/target.go:23 +0xb0\n  interleaveguard/benchmarks/b12_slicealias.TestInterleaveGuardAudit.func1()\n      /Users/deepikaparimi/interleave-guard/benchmarks/b12_slicealias/interleaveguard_gen_test.go:16 +0x",
+        "generated_test_code": "package b12_slicealias\n\nimport (\n\t\"sync\"\n\t\"testing\"\n)\n\nfunc TestInterleaveGuardAudit(t *testing.T) {\n\tconst iterations = 1000\n\tvar wg sync.WaitGroup\n\n\tfor i := 0; i < iterations; i++ {\n\t\twg.Add(1)\n\t\tgo func() {\n\t\t\tdefer wg.Done()\n\t\t\t_ = CallerSplitBuffer()\n\t\t}()\n\t}\n\n\twg.Wait()\n}",
+        "token_stats": {
+          "prompt": 37013,
+          "completion": 11594,
+          "calls": 36
+        }
+      }
+    },
+    "b13_doubletransfer": {
+      "package": "b13_doubletransfer",
+      "ground_truth": "BUGGY",
+      "final_detected": true,
+      "specs": {
+        "Transfer": {
+          "precondition": "src != nil && dst != nil && amt >= 0 && src != dst",
+          "postcondition": "if returned true, src.balance decreased by amt and dst.balance increased by amt; if false, balances are unchanged",
+          "rely": "True",
+          "guarantee": "Atomic money transfer between distinct vaults without creation or destruction of funds",
+          "expected_callees": {
+            "Withdraw": "Atomically checks if balance >= amt and deducts amt if sufficient, returning true or false",
+            "Deposit": "Atomically adds amt to the vault balance"
+          }
+        },
+        "CallerAuditConservation": {
+          "precondition": "a != nil && b != nil",
+          "postcondition": "returns the sum of a.Balance() and b.Balance()",
+          "rely": "True",
+          "guarantee": "Reads vault balances safely without mutating state",
+          "expected_callees": {
+            "Balance": "Atomically acquires lock and returns current vault balance"
+          }
+        },
+        "Withdraw": {
+          "precondition": "v != nil && amt >= 0",
+          "postcondition": "if v.balance >= amt, v.balance decreases by amt and returns true; otherwise returns false",
+          "rely": "True",
+          "guarantee": "Protects v.balance modifications with v.mu",
+          "expected_callees": {}
+        },
+        "Deposit": {
+          "precondition": "v != nil && amt >= 0",
+          "postcondition": "v.balance increases by amt",
+          "rely": "True",
+          "guarantee": "Protects v.balance modifications with v.mu",
+          "expected_callees": {}
+        },
+        "Balance": {
+          "precondition": "v != nil",
+          "postcondition": "returns current v.balance safely",
+          "rely": "True",
+          "guarantee": "Protects v.balance read with v.mu",
+          "expected_callees": {}
+        }
+      },
+      "analysis": {
+        "vulnerable": true,
+        "bug_category": "Atomicity Violation",
+        "violated_contract": "Transfer: Atomic money transfer between distinct vaults without creation or destruction of funds. Split-lock gap exists between src.Withdraw(amt) and dst.Deposit(amt) in Transfer().",
+        "interleaving_schedule": [
+          {
+            "step": 1,
+            "goroutine": "G1",
+            "action": "Transfer(src, dst, 100) calls src.Withdraw(100), locks src.mu, decrements src.balance, unlocks src.mu, returns true."
+          },
+          {
+            "step": 2,
+            "goroutine": "G2",
+            "action": "CallerAuditConservation(src, dst) or concurrent transfer reads intermediate state where funds have left src but not yet arrived at dst, violating the global conservation invariant."
+          },
+          {
+            "step": 3,
+            "goroutine": "G1",
+            "action": "Transfer resumes and calls dst.Deposit(100), locking dst.mu and incrementing dst.balance."
+          }
+        ],
+        "test_strategy": "Spawn multiple goroutines concurrently transferring funds between multiple vaults while another goroutine continuously audits the sum of all balances. Assert that the total sum remains constant at all times, or use a multi-vault lock ordering/global lock to prevent intermediate non-atomic states.",
+        "repair_suggestion": "To make Transfer atomic across both vaults, acquire both locks in a consistent order (e.g., ordered by memory address to avoid deadlocks) or introduce a higher-level mutex/transaction mechanism: \n\nfunc Transfer(src, dst *Vault, amt int) bool {\n\tif src == dst {\n\t\treturn false\n\t}\n\t// Lock both in address order to prevent deadlock\n\tvar first, second *Vault\n\tif &src.mu < &dst.mu {\n\t\tfirst, second = src, dst\n\t} else {\n\t\tfirst, second = dst, src\n\t}\n\tfirst.mu.Lock()\n\tdefer first.mu.Unlock()\n\tsecond.mu.Lock()\n\tdefer second.mu.Unlock()\n\n\tif src.balance < amt {\n\t\treturn false\n\t}\n\tsrc.balance -= amt\n\tdst.balance += amt\n\treturn true\n}"
+      },
+      "test_execution": {
+        "package": "b13_doubletransfer",
+        "compiled": true,
+        "bug_witnessed_by_test": false,
+        "llm_predicted_vulnerable": true,
+        "test_exit_code": 1,
+        "test_output": "FAIL\tinterleaveguard/benchmarks/b13_doubletransfer [setup failed]\nFAIL\n\n# interleaveguard/benchmarks/b13_doubletransfer\nb13_doubletransfer/interleaveguard_gen_test.go:10:16: expected '}', found 'EOF'",
+        "generated_test_code": "package b13_doubletransfer\n\nimport (\n\t\"sync\"\n\t\"testing\"\n\t\"time\"\n)\n\nfunc TestInterleaveGuardAudit(t *testing.T) {\n\tconst initial",
+        "token_stats": {
+          "prompt": 41046,
+          "completion": 13145,
+          "calls": 39
+        }
+      }
+    },
+    "b14_poolpoison": {
+      "package": "b14_poolpoison",
+      "ground_truth": "BUGGY",
+      "final_detected": true,
+      "specs": {
+        "CallerHandleSession": {
+          "precondition": "p != nil",
+          "postcondition": "returns owner string of the session buffer after setting it to dirty",
+          "rely": "other goroutines do not concurrently corrupt p.mu or buf.mu",
+          "guarantee": "preserves session pool integrity and properly serializes access to buf",
+          "expected_callees": {
+            "Acquire": "returns a valid SessionBuf allocated or retrieved from the pool with ownership set to user",
+            "Release": "returns the SessionBuf back to the pool safely under p.mu"
+          }
+        },
+        "Acquire": {
+          "precondition": "p != nil",
+          "postcondition": "returns a non-nil *SessionBuf assigned to user with clean status if from pool",
+          "rely": "other goroutines only access p.free and pool state via mutex protection",
+          "guarantee": "ensures thread-safe acquisition of a SessionBuf, updating ownership and clearing dirty flag if reused",
+          "expected_callees": {}
+        },
+        "Release": {
+          "precondition": "p != nil and b != nil",
+          "postcondition": "appends b to p.free slice",
+          "rely": "other goroutines only access p.free under p.mu protection",
+          "guarantee": "ensures thread-safe return of the SessionBuf b back to the pool",
+          "expected_callees": {}
+        }
+      },
+      "analysis": {
+        "vulnerable": true,
+        "bug_category": "Atomicity Violation",
+        "violated_contract": "Premature pool/resource release before final field mutation (check-then-act / split-lock gap between Release and subsequent mutations on the returned buffer)",
+        "interleaving_schedule": [
+          {
+            "step": 1,
+            "goroutine": "G1",
+            "action": "CallerHandleSession calls p.Acquire(user), gets buf, then immediately calls p.Release(buf)"
+          },
+          {
+            "step": 2,
+            "goroutine": "G1",
+            "action": "Release adds buf back to p.free under p.mu"
+          },
+          {
+            "step": 3,
+            "goroutine": "G2",
+            "action": "Another goroutine calls p.Acquire(otherUser), pops buf from p.free, locks buf.mu, and modifies buf.owner and buf.dirty"
+          },
+          {
+            "step": 4,
+            "goroutine": "G1",
+            "action": "G1 resumes after Release and executes buf.mu.Lock(), buf.dirty = true, mutating a buffer that is now concurrently owned and used by G2"
+          }
+        ],
+        "test_strategy": "Launch multiple goroutines concurrently calling CallerHandleSession on a shared SessionPool. Assert that buffers are not mutated after being released to the pool, or use the race detector (-race) which will detect a data race on buf.owner and buf.dirty between G1 and G2.",
+        "repair_suggestion": "Perform all mutations on the SessionBuf (such as setting dirty and inspecting/modifying fields) while still holding exclusive access or before releasing the buffer back to the pool. In CallerHandleSession, set buf.dirty = true BEFORE calling p.Release(buf)."
+      },
+      "test_execution": {
+        "package": "b14_poolpoison",
+        "compiled": true,
+        "bug_witnessed_by_test": false,
+        "llm_predicted_vulnerable": true,
+        "test_exit_code": 0,
+        "test_output": "ok  \tinterleaveguard/benchmarks/b14_poolpoison\t1.501s",
+        "generated_test_code": "package b14_poolpoison\n\nimport (\n\t\"sync\"\n\t\"testing\"\n\t\"time\"\n)\n\nfunc TestInterleaveGuardAudit(t *testing.T) {\n\tpool := NewSessionPool()\n\tconst numGoroutines = 10\n\tconst iterations = 100\n\n\tdone := make(chan struct{})\n\n\tfor i := 0; i < iterations; i++ {\n\t\tstart := make(chan struct{})\n\t\tvar wg sync.WaitGroup\n\t\twg.Add(numGoroutines)\n\n\t\tfor g := 0; g < numGoroutines; g++ {\n\t\t\tgo func(user string) {\n\t\t\t\tdefer wg.Done()\n\t\t\t\t<-start\n\t\t\t\tCallerHandleSession(pool, user)\n\t\t\t}(\"user\")\n\t\t}\n\n\t\tclose(start)\n\n\t\t// Wait with a timeout to detect deadlocks or hangs\n\t\twaitChan := make(chan struct{})\n\t\tgo func() {\n\t\t\twg.Wait()\n\t\t\tclose(waitChan)\n\t\t}()\n\n\t\tselect {\n\t\tcase <-waitChan:\n\t\t\t// Completed this iteration\n\t\tcase <-time.After(1 * time.Second):\n\t\t\tt.Fatalf(\"Test timed out, possible deadlock detected\")\n\t\t}\n\t}\n\n\tclose(done)\n}",
+        "token_stats": {
+          "prompt": 44813,
+          "completion": 14195,
+          "calls": 42
+        }
+      }
+    },
+    "b15_oncefallback": {
+      "package": "b15_oncefallback",
+      "ground_truth": "BUGGY",
+      "final_detected": true,
+      "specs": {
+        "CallerConnectWithRetry": {
+          "precondition": "m != nil",
+          "postcondition": "returns the established connection string or error, having initialized m safely",
+          "rely": "true",
+          "guarantee": "preserves ConnManager integrity during initialization",
+          "expected_callees": {
+            "Init": "Atomically executes initialization once and returns m.conn and m.err safely under lock"
+          }
+        },
+        "Init": {
+          "precondition": "m != nil",
+          "postcondition": "m.once has executed, m.mu is unlocked, and returns (m.conn, m.err)",
+          "rely": "concurrent goroutines may call Init concurrently, but sync.Once and sync.Mutex serialize access correctly",
+          "guarantee": "m.once ensures the initialization logic executes at most once, and m.mu protects concurrent reads of m.conn and m.err",
+          "expected_callees": {}
+        }
+      },
+      "analysis": {
+        "vulnerable": true,
+        "bug_category": "Atomicity Violation",
+        "violated_contract": "sync.Once caching transient errors permanently, preventing future successful initialization attempts.",
+        "interleaving_schedule": [
+          {
+            "step": 1,
+            "goroutine": "G1",
+            "action": "Calls m.Init(true), enters m.once.Do and sets m.err = errors.New(\"dial timeout\")"
+          },
+          {
+            "step": 2,
+            "goroutine": "G2",
+            "action": "Calls m.Init(false), m.once.Do skips execution because once has already run (due to G1's failure), returns m.conn (\"\") and m.err (\"dial timeout\") permanently"
+          }
+        ],
+        "test_strategy": "Create a ConnManager instance. Launch a goroutine calling Init(true) expecting failure. Afterwards, launch another goroutine calling Init(false) expecting success, but assert that it receives the cached transient error instead of \"connected-db\".",
+        "repair_suggestion": "Remove sync.Once or implement a retry loop using sync.Mutex where initialization repeats until m.err == nil."
+      },
+      "test_execution": {
+        "package": "b15_oncefallback",
+        "compiled": true,
+        "bug_witnessed_by_test": false,
+        "llm_predicted_vulnerable": true,
+        "test_exit_code": 1,
+        "test_output": "FAIL\tinterleaveguard/benchmarks/b15_oncefallback [setup failed]\nFAIL\n\n# interleaveguard/benchmarks/b15_oncefallback\nb15_oncefallback/interleaveguard_gen_test.go:49:5: expected '}', found 'EOF'",
+        "generated_test_code": "package b15_oncefallback\n\nimport (\n\t\"errors\"\n\t\"sync\"\n\t\"testing\"\n)\n\ntype ConnManager struct {\n\tconn string\n\terr  error\n\tmu   sync.Mutex\n\tonce sync.Once\n}\n\nfunc NewConnManager() *ConnManager { return &ConnManager{} }\n\nfunc (m *ConnManager) Init(shouldFail bool) (string, error) {\n\tm.once.Do(func() {\n\t\tm.mu.Lock()\n\t\tdefer m.mu.Unlock()\n\t\tif shouldFail {\n\t\t\tm.err = errors.New(\"dial timeout\")\n\t\t\treturn\n\t\t}\n\t\tm.conn = \"connected-db\"\n\t\tm.err = nil\n\t})\n\tm.mu.Lock()\n\tdefer m.mu.Unlock()\n\treturn m.conn, m.err\n}\n\nfunc CallerConnectWithRetry(m *ConnManager, fail bool) (string, error) {\n\treturn m.Init(fail)\n}\n\nfunc TestInterleaveGuardAudit(t *testing.T) {\n\t// The vulnerability is that sync.Once caches the initial failure.\n\t// If G1 calls Init(true) and fails, G2 calling Init(false) afterwards\n\t// gets the cached error instead of successfully connecting, due to sync.Once.\n\t// We demonstrate this violation of retry logic.\n\n\tm := NewConnManager()\n\n\t// Step 1: G1 calls Init(true) and should fail.\n\t_, err := CallerConnectWithRetry(m, true)\n\tif err == nil {\n\t\tt",
+        "token_stats": {
+          "prompt": 47623,
+          "completion": 15248,
+          "calls": 45
+        }
+      }
+    },
+    "b16_subpubrace": {
+      "package": "b16_subpubrace",
+      "ground_truth": "BUGGY",
+      "final_detected": true,
+      "specs": {
+        "PublishNext": {
+          "precondition": "b != nil and b.mu is unlocked",
+          "postcondition": "b.version is incremented and broadcast to all subscriber channels without blocking",
+          "rely": "Concurrent goroutines may read or mutate b.version or b.subs only through synchronized methods",
+          "guarantee": "Exclusive access to b.mu is maintained during mutation and broadcasting",
+          "expected_callees": {}
+        },
+        "CallerWatchFromCurrent": {
+          "precondition": "b != nil",
+          "postcondition": "Returns the latest version and a newly subscribed channel",
+          "rely": "Concurrent modifications to b are protected by b.mu",
+          "guarantee": "Calls LatestVersion and Subscribe safely in sequence",
+          "expected_callees": {
+            "LatestVersion": "Atomically fetches the current version under lock",
+            "Subscribe": "Atomically creates and registers a new subscriber channel under lock"
+          }
+        },
+        "LatestVersion": {
+          "precondition": "b != nil and b.mu is unlocked",
+          "postcondition": "Returns the current value of b.version",
+          "rely": "Concurrent goroutines may modify b.version only while holding b.mu",
+          "guarantee": "Reads b.version safely under b.mu without modifying state",
+          "expected_callees": {}
+        },
+        "Subscribe": {
+          "precondition": "b != nil and b.mu is unlocked",
+          "postcondition": "Returns a new buffered channel appended to b.subs",
+          "rely": "Concurrent goroutines may access b.subs only while holding b.mu",
+          "guarantee": "Modifies b.subs safely under b.mu and returns the new channel",
+          "expected_callees": {}
+        }
+      },
+      "analysis": {
+        "vulnerable": true,
+        "bug_category": "Atomicity Violation",
+        "violated_contract": "CallerWatchFromCurrent expects to observe a consistent snapshot where any event published after LatestVersion() returns is guaranteed to be delivered to the channel returned by Subscribe().",
+        "interleaving_schedule": [
+          {
+            "step": 1,
+            "goroutine": "G1 (CallerWatchFromCurrent)",
+            "action": "Calls b.LatestVersion() -> acquires mu, reads version = 1, releases mu."
+          },
+          {
+            "step": 2,
+            "goroutine": "G2 (Publisher)",
+            "action": "Calls b.PublishNext() -> acquires mu, increments version to 2, broadcasts version 2 to existing subs (none yet), releases mu."
+          },
+          {
+            "step": 3,
+            "goroutine": "G1 (CallerWatchFromCurrent)",
+            "action": "Calls b.Subscribe() -> acquires mu, appends new channel ch to b.subs, releases mu."
+          }
+        ],
+        "test_strategy": "Create a test where a goroutine calls CallerWatchFromCurrent while another concurrently calls PublishNext. Assert that if the version returned by CallerWatchFromCurrent is v, and PublishNext is called immediately after, the newly subscribed channel receives the new update. Alternatively, demonstrate the split-lock gap by publishing between LatestVersion and Subscribe, causing an event to be permanently missed by a client intending to watch 'from current'.",
+        "repair_suggestion": "Combine LatestVersion and Subscribe into a single atomic method under one lock acquisition, e.g., func (b *EventBroker) WatchFromCurrent() (int, chan int) { b.mu.Lock(); defer b.mu.Unlock(); ch := make(chan int, 1); b.subs = append(b.subs, ch); return b.version, ch }"
+      },
+      "test_execution": {
+        "package": "b16_subpubrace",
+        "compiled": true,
+        "bug_witnessed_by_test": true,
+        "llm_predicted_vulnerable": true,
+        "test_exit_code": 1,
+        "test_output": "--- FAIL: TestInterleaveGuardAudit (0.00s)\n    interleaveguard_gen_test.go:56: Atomicity violation: missed update after CallerWatchFromCurrent\nFAIL\nFAIL\tinterleaveguard/benchmarks/b16_subpubrace\t0.375s\nFAIL",
+        "generated_test_code": "package b16_subpubrace\n\nimport (\n\t\"sync\"\n\t\"testing\"\n)\n\nfunc TestInterleaveGuardAudit(t *testing.T) {\n\tfor i := 0; i < 100; i++ {\n\t\tbroker := NewEventBroker()\n\t\t\n\t\tstart := make(chan struct{})\n\t\tvar wg sync.WaitGroup\n\t\twg.Add(2)\n\n\t\tvar observedVersion int\n\t\tvar ch chan int\n\t\tvar missed bool\n\n\t\t// G1: CallerWatchFromCurrent\n\t\tgo func() {\n\t\t\tdefer wg.Done()\n\t\t\t<-start\n\t\t\tobservedVersion, ch = CallerWatchFromCurrent(broker)\n\t\t}()\n\n\t\t// G2: Publisher\n\t\tgo func() {\n\t\t\tdefer wg.Done()\n\t\t\t<-start\n\t\t\t// Force the interleaving: Publish between LatestVersion and Subscribe\n\t\t\t// We rely on the scheduler to pause G1 after LatestVersion\n\t\t\tbroker.PublishNext()\n\t\t}()\n\n\t\tclose(start)\n\t\twg.Wait()\n\n\t\t// If G2 published after G1 called LatestVersion but before G1 called Subscribe,\n\t\t// the version incremented to 2, but the channel was not in subs when it happened.\n\t\t// The channel should have received the update if it was truly \"watching from current\".\n\t\tselect {\n\t\tcase val := <-ch:\n\t\t\tif val != 2 {\n\t\t\t\tt.Fatalf(\"Expected update 2, got %d\", val)\n\t\t\t}\n\t\tdefault:\n\t\t\t// If we missed the update, the invariant is violated.\n\t\t\t// If observedVersion was 1 and we missed the update to 2, we have a race.\n\t\t\tif observedVersion == 1 {\n\t\t\t\tmissed = true\n\t\t\t}\n\t\t}\n\n\t\tif missed {\n\t\t\tt.Fatalf(\"Atomicity violation: missed update after CallerWatchFromCurrent\")\n\t\t}\n\t}\n}",
+        "token_stats": {
+          "prompt": 51431,
+          "completion": 16515,
+          "calls": 48
+        }
+      }
+    },
+    "b17_timerreset": {
+      "package": "b17_timerreset",
+      "ground_truth": "BUGGY",
+      "final_detected": true,
+      "specs": {
+        "WaitExpired": {
+          "precondition": "w != nil and w.timer != nil",
+          "postcondition": "timer has fired and value received from w.timer.C",
+          "rely": "Concurrent goroutines may interact with timer or reset it, provided channel read progresses safely.",
+          "guarantee": "Reads from w.timer.C without mutating shared fields without locks.",
+          "expected_callees": {}
+        },
+        "CallerExtendDeadline": {
+          "precondition": "w != nil",
+          "postcondition": "w.Kick has been invoked to extend the deadline",
+          "rely": "Concurrent goroutines respect Watchdog ownership boundaries.",
+          "guarantee": "Correctly invokes w.Kick to update the timer deadline.",
+          "expected_callees": {
+            "Kick": "Atomically stops and resets the watchdog timer under mutex protection."
+          }
+        },
+        "Kick": {
+          "precondition": "w != nil and w.timer != nil",
+          "postcondition": "w.timer is stopped and successfully reset with the new duration d",
+          "rely": "Concurrent goroutines do not access w.timer concurrently without holding w.mu.",
+          "guarantee": "Acquires w.mu, safely drains or stops w.timer, and resets it without race conditions.",
+          "expected_callees": {}
+        }
+      },
+      "analysis": {
+        "vulnerable": true,
+        "bug_category": "Atomicity Violation",
+        "violated_contract": "time.Timer.Reset() called without draining timer.C when Stop() returns false can cause Reset() to fail to reset properly or channel to be out of sync.",
+        "interleaving_schedule": [
+          {
+            "step": 1,
+            "goroutine": "G1",
+            "action": "Calls w.Kick(d) which fires timer and successfully stops it before it's read, or timer expires naturally."
+          },
+          {
+            "step": 2,
+            "goroutine": "G2",
+            "action": "Calls w.Kick(d) where w.timer.Stop() returns false because the timer has already fired and its channel contains an unread expiration value."
+          },
+          {
+            "step": 3,
+            "goroutine": "G2",
+            "action": "Executes w.timer.Reset(d) without draining the stale value from w.timer.C, leading to potential premature expiration or protocol violation."
+          }
+        ],
+        "test_strategy": "Create a test with a short-duration Watchdog, let it expire so the value is in timer.C (or stop returns false), concurrently invoke Kick multiple times rapidly without draining, and observe incorrect timer expiration behavior.",
+        "repair_suggestion": "func (w *Watchdog) Kick(d time.Duration) {\n\tw.mu.Lock()\n\tdefer w.mu.Unlock()\n\tif !w.timer.Stop() {\n\t\tselect {\n\t\tcase <-w.timer.C:\n\t\tdefault:\n\t\t}\n\t}\n\tw.timer.Reset(d)\n}"
+      },
+      "test_execution": {
+        "package": "b17_timerreset",
+        "compiled": true,
+        "bug_witnessed_by_test": false,
+        "llm_predicted_vulnerable": true,
+        "test_exit_code": 0,
+        "test_output": "ok  \tinterleaveguard/benchmarks/b17_timerreset\t2.215s",
+        "generated_test_code": "package b17_timerreset\n\nimport (\n\t\"sync\"\n\t\"testing\"\n\t\"time\"\n)\n\nfunc TestInterleaveGuardAudit(t *testing.T) {\n\tfor i := 0; i < 50; i++ {\n\t\twd := NewWatchdog(5 * time.Millisecond)\n\n\t\t// Let the timer expire naturally so that the expiration value is sitting in w.timer.C,\n\t\t// and w.timer.Stop() will return false.\n\t\ttime.Sleep(15 * time.Millisecond)\n\n\t\tstartChan := make(chan struct{})\n\t\tvar wg sync.WaitGroup\n\t\twg.Add(2)\n\n\t\t// G1: Concurrently kick the watchdog\n\t\tgo func() {\n\t\t\t<-startChan\n\t\t\tdefer wg.Done()\n\t\t\twd.Kick(100 * time.Millisecond)\n\t\t}()\n\n\t\t// G2: Concurrently kick the watchdog again, triggering the Stop() returning false\n\t\t// and Reset() without drain vulnerability.\n\t\tgo func() {\n\t\t\t<-startChan\n\t\t\tdefer wg.Done()\n\t\t\twd.Kick(200 * time.Millisecond)\n\t\t}()\n\n\t\tclose(startChan)\n\n\t\t// Wait with a timeout to catch deadlocks or blocked behaviors.\n\t\tdone := make(chan struct{})\n\t\tgo func() {\n\t\t\twg.Wait()\n\t\t\tclose(done)\n\t\t}()\n\n\t\tselect {\n\t\tcase <-done:\n\t\t\t// Completed execution of concurrent kicks.\n\t\tcase <-time.After(1 * time.Second):\n\t\t\tt.Fatalf(\"Test timed out, possible deadlock detected during concurrent Kick calls\")\n\t\t}\n\t}\n}",
+        "token_stats": {
+          "prompt": 54325,
+          "completion": 17614,
+          "calls": 51
+        }
+      }
+    },
+    "b18_nestedrw": {
+      "package": "b18_nestedrw",
+      "ground_truth": "BUGGY",
+      "final_detected": true,
+      "specs": {
+        "Update": {
+          "precondition": "r.mu is unlocked",
+          "postcondition": "r.items[k] == v",
+          "rely": "No other goroutine holds r.mu",
+          "guarantee": "r.mu is released and r.items is updated atomically",
+          "expected_callees": {}
+        },
+        "CallerResolveConfig": {
+          "precondition": "r is initialized",
+          "postcondition": "returns an int value from r.items",
+          "rely": "r.mu is not held by any other goroutine in a way that causes deadlock",
+          "guarantee": "r.mu state is preserved",
+          "expected_callees": {
+            "ReadWithFallback": "atomically returns value for primary or fallback key"
+          }
+        },
+        "ReadWithFallback": {
+          "precondition": "r.mu is unlocked",
+          "postcondition": "returns value associated with primary or fallback key",
+          "rely": "r.mu is not held by any other goroutine",
+          "guarantee": "r.mu is released after read operations",
+          "expected_callees": {
+            "lookupInternal": "atomically returns value for fallback key while holding RLock"
+          }
+        },
+        "lookupInternal": {
+          "precondition": "r.mu is unlocked",
+          "postcondition": "returns value for key k",
+          "rely": "r.mu is not held by any other goroutine",
+          "guarantee": "r.mu is released after read operation",
+          "expected_callees": {}
+        }
+      },
+      "analysis": {
+        "vulnerable": true,
+        "bug_category": "Deadlock",
+        "violated_contract": "Reentrant RWMutex.RLock() calls that deadlock when a concurrent writer calls Lock()",
+        "interleaving_schedule": [
+          {
+            "step": 1,
+            "goroutine": "G1",
+            "action": "Calls ReadWithFallback, acquires r.mu.RLock() at line 21."
+          },
+          {
+            "step": 2,
+            "goroutine": "G1",
+            "action": "Calls r.lookupInternal(fallback) inside ReadWithFallback while holding r.mu.RLock()."
+          },
+          {
+            "step": 3,
+            "goroutine": "G1",
+            "action": "Attempts to acquire r.mu.RLock() inside lookupInternal (line 15) while already holding r.mu (reentrant RLock)."
+          },
+          {
+            "step": 4,
+            "goroutine": "G2",
+            "action": "Attempts to call Update, requesting r.mu.Lock(). In Go, sync.RWMutex is NOT reentrant. If a pending Writer (G2) is waiting for the lock, a goroutine (G1) holding an RLock that tries to recursively acquire RLock will block behind the writer, causing a permanent deadlock."
+          }
+        ],
+        "test_strategy": "Spawn a goroutine that calls ReadWithFallback under moderate write contention (concurrent Update calls), and verify that it deadlocks or times out using a test with context.WithTimeout.",
+        "repair_suggestion": "Remove the inner locking from lookupInternal and make it an unexported helper that expects the caller to already hold r.mu. For example:\n\nfunc (r *Registry) lookupInternal(k string) int {\n\treturn r.items[k]\n}\n\nAnd ensure ReadWithFallback and lookupInternal do not nest RLock calls."
+      },
+      "test_execution": {
+        "package": "b18_nestedrw",
+        "compiled": true,
+        "bug_witnessed_by_test": true,
+        "llm_predicted_vulnerable": true,
+        "test_exit_code": 1,
+        "test_output": "--- FAIL: TestInterleaveGuardAudit (2.00s)\n    interleaveguard_gen_test.go:28: Deadlock detected: test timed out due to reentrant RWMutex lock contention under concurrent writes.\nFAIL\nFAIL\tinterleaveguard/benchmarks/b18_nestedrw\t2.411s\nFAIL",
+        "generated_test_code": "package b18_nestedrw\n\nimport (\n\t\"context\"\n\t\"testing\"\n\t\"time\"\n)\n\nfunc TestInterleaveGuardAudit(t *testing.T) {\n\tctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)\n\tdefer cancel()\n\n\tdone := make(chan struct{})\n\n\tgo func() {\n\t\tdefer close(done)\n\t\tr := NewRegistry()\n\n\t\t// Run a loop of concurrent readers and writers to trigger the RWMutex deadlock\n\t\tfor i := 0; i < 100; i++ {\n\t\t\tgo r.Update(\"core\", i)\n\t\t\t_ = CallerResolveConfig(r)\n\t\t}\n\t}()\n\n\tselect {\n\tcase <-ctx.Done():\n\t\tt.Fatalf(\"Deadlock detected: test timed out due to reentrant RWMutex lock contention under concurrent writes.\")\n\tcase <-done:\n\t\t// Test completed successfully without deadlocking\n\t}\n}",
+        "token_stats": {
+          "prompt": 57956,
+          "completion": 18666,
+          "calls": 54
+        }
+      }
+    },
+    "c01_safebank": {
+      "package": "c01_safebank",
+      "ground_truth": "SAFE",
+      "final_detected": false,
+      "specs": {
+        "CallerSafeATM": {
+          "precondition": "a != nil && amt >= 0",
+          "postcondition": "res == (a.balance_old >= amt) && (res ? a.balance == a.balance_old - amt : a.balance == a.balance_old)",
+          "rely": "true",
+          "guarantee": "true",
+          "expected_callees": {
+            "Withdraw": "Atomically checks and deducts balance if sufficient funds exist under mutual exclusion"
+          }
+        },
+        "Withdraw": {
+          "precondition": "a != nil && amt >= 0",
+          "postcondition": "(res == (old(a.balance) >= amt)) && (res ? a.balance == old(a.balance) - amt : a.balance == old(a.balance))",
+          "rely": "Other threads only access a.balance through methods that acquire a.mu",
+          "guarantee": "Preserves mutual exclusion invariant via a.mu and correctly updates balance atomically",
+          "expected_callees": {}
+        }
+      },
+      "analysis": {
+        "vulnerable": false,
+        "bug_category": "None",
+        "violated_contract": "None",
+        "interleaving_schedule": [],
+        "test_strategy": "None",
+        "repair_suggestion": "None"
+      },
+      "test_execution": {
+        "package": "c01_safebank",
+        "compiled": true,
+        "bug_witnessed_by_test": false,
+        "llm_predicted_vulnerable": false,
+        "test_exit_code": 0,
+        "test_output": "ok  \tinterleaveguard/benchmarks/c01_safebank\t1.389s",
+        "generated_test_code": "package c01_safebank\n\nimport (\n\t\"sync\"\n\t\"testing\"\n)\n\nfunc TestInterleaveGuardAudit(t *testing.T) {\n\tconst initialBalance = 100\n\tconst withdrawAmt = 60\n\tconst numGoroutines = 10\n\n\tfor i := 0; i < 50; i++ {\n\t\taccount := NewSafeAccount(initialBalance)\n\t\tvar wg sync.WaitGroup\n\t\tstart := make(chan struct{})\n\n\t\tsuccessCount := 0\n\t\tvar mu sync.Mutex\n\n\t\tfor g := 0; g < numGoroutines; g++ {\n\t\t\twg.Add(1)\n\t\t\tgo func() {\n\t\t\t\tdefer wg.Done()\n\t\t\t\t<-start\n\t\t\t\tif CallerSafeATM(account, withdrawAmt) {\n\t\t\t\t\tmu.Lock()\n\t\t\t\t\tsuccessCount++\n\t\t\t\t\tmu.Unlock()\n\t\t\t\t}\n\t\t\t}()\n\t\t}\n\n\t\tclose(start)\n\t\twg.Wait()\n\n\t\tif successCount > 1 {\n\t\t\tt.Fatalf(\"iteration %d: expected at most 1 successful withdrawal of %d from balance %d, but got %d\",\n\t\t\t\ti, withdrawAmt, initialBalance, successCount)\n\t\t}\n\t}\n}",
+        "token_stats": {
+          "prompt": 60139,
+          "completion": 19256,
+          "calls": 57
+        }
+      }
+    },
+    "c02_safepool": {
+      "package": "c02_safepool",
+      "ground_truth": "SAFE",
+      "final_detected": false,
+      "specs": {
+        "CallerRunPool": {
+          "precondition": "len(ids) >= 0",
+          "postcondition": "returns the sum of all job IDs multiplied by 2",
+          "rely": "true",
+          "guarantee": "safely dispatches jobs to workers, waits for completion, and aggregates results without data races",
+          "expected_callees": {
+            "SafeWorkerPool": "processes jobs from the channel and sends doubled IDs to the results channel, decrementing the waitgroup on completion"
+          }
+        },
+        "SafeWorkerPool": {
+          "precondition": "jobs and results channels are properly initialized, wg is tracking active workers",
+          "postcondition": "all available jobs from jobs channel are processed and wg.Done() is called",
+          "rely": "jobs channel will eventually be closed by the sender, results channel has adequate capacity or another receiver",
+          "guarantee": "reads only from jobs, writes only to results, and safely calls wg.Done() on exit",
+          "expected_callees": {}
+        }
+      },
+      "analysis": {
+        "vulnerable": false,
+        "bug_category": "None",
+        "violated_contract": "None",
+        "interleaving_schedule": [],
+        "test_strategy": "None needed; the implementation uses unbuffered/buffered channels and WaitGroup correctly with no shared mutable memory or race conditions.",
+        "repair_suggestion": "None"
+      },
+      "test_execution": {
+        "package": "c02_safepool",
+        "compiled": false,
+        "bug_witnessed_by_test": false,
+        "llm_predicted_vulnerable": false,
+        "test_exit_code": 1,
+        "test_output": "FAIL\tinterleaveguard/benchmarks/c02_safepool [build failed]\nFAIL\n\n# interleaveguard/benchmarks/c02_safepool [interleaveguard/benchmarks/c02_safepool.test]\nc02_safepool/interleaveguard_gen_test.go:4:2: \"sync\" imported and not used\nc02_safepool/interleaveguard_gen_test.go:17:6: declared and not used: actualSum",
+        "generated_test_code": "package c02_safepool\n\nimport (\n\t\"sync\"\n\t\"testing\"\n\t\"time\"\n)\n\nfunc TestInterleaveGuardAudit(t *testing.T) {\n\tids := []int{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}\n\texpectedSum := 0\n\tfor _, id := range ids {\n\t\texpectedSum += id * 2\n\t}\n\n\tdone := make(chan struct{})\n\tvar actualSum int\n\n\tgo func() {\n\t\tfor i := 0; i < 50; i++ {\n\t\t\tsum := CallerRunPool(ids)\n\t\t\tif sum != expectedSum {\n\t\t\t\tt.Fatalf(\"iteration %d: expected sum %d, got %d\", i, expectedSum, sum)\n\t\t\t}\n\t\t}\n\t\tclose(done)\n\t}()\n\n\tselect {\n\tcase <-done:\n\t\t// Passed successfully within time limit\n\tcase <-time.After(2 * time.Second):\n\t\tt.Fatalf(\"test timed out, potential deadlock in SafeWorkerPool or CallerRunPool\")\n\t}\n}",
+        "token_stats": {
+          "prompt": 2667,
+          "completion": 588,
+          "calls": 3
+        }
+      }
+    },
+    "c03_epochcommit": {
+      "package": "c03_epochcommit",
+      "ground_truth": "SAFE",
+      "final_detected": false,
+      "specs": {
+        "CallerOptimisticAdd": {
+          "precondition": "s != nil",
+          "postcondition": "returns true if value was optimistically updated based on read epoch, false otherwise",
+          "rely": "true",
+          "guarantee": "true",
+          "expected_callees": {
+            "Read": "Returns the current value and epoch safely",
+            "CompareAndCommit": "Atomically checks epoch and commits new value if epoch matches"
+          }
+        },
+        "Read": {
+          "precondition": "s != nil",
+          "postcondition": "returns current val and epoch",
+          "rely": "other goroutines may modify s.val and s.epoch only while holding s.mu",
+          "guarantee": "preserves consistency of s.val and s.epoch under s.mu lock",
+          "expected_callees": {}
+        },
+        "CompareAndCommit": {
+          "precondition": "s != nil",
+          "postcondition": "if s.epoch == expectedEpoch, s.val becomes newVal and s.epoch increments and returns true; else returns false",
+          "rely": "other goroutines may modify s.val and s.epoch only while holding s.mu",
+          "guarantee": "atomically updates s.val and s.epoch under s.mu lock if epoch matches expectedEpoch",
+          "expected_callees": {}
+        }
+      },
+      "analysis": {
+        "vulnerable": false,
+        "bug_category": "None",
+        "violated_contract": "None",
+        "interleaving_schedule": [],
+        "test_strategy": "Use a sync.WaitGroup to spawn multiple goroutines calling CallerOptimisticAdd concurrently. Assert that the final value of s.val matches the expected sum of deltas applied to the initial value, verifying that the optimistic concurrency control (CompareAndCommit) correctly handles contention.",
+        "repair_suggestion": "The current implementation is safe because CallerOptimisticAdd correctly uses the epoch returned by Read as a version token for the CompareAndCommit operation, ensuring atomicity of the read-modify-write cycle despite the split-lock gap."
+      },
+      "test_execution": {
+        "package": "c03_epochcommit",
+        "compiled": true,
+        "bug_witnessed_by_test": false,
+        "llm_predicted_vulnerable": false,
+        "test_exit_code": 0,
+        "test_output": "ok  \tinterleaveguard/benchmarks/c03_epochcommit\t1.493s",
+        "generated_test_code": "package c03_epochcommit\n\nimport (\n\t\"sync\"\n\t\"testing\"\n)\n\nfunc TestInterleaveGuardAudit(t *testing.T) {\n\tfor iteration := 0; iteration < 50; iteration++ {\n\t\tstore := &VersionedStore{}\n\t\tconst numGoroutines = 10\n\t\tconst deltaPerGoroutine = 1\n\n\t\tvar wg sync.WaitGroup\n\t\twg.Add(numGoroutines)\n\n\t\tstart := make(chan struct{})\n\n\t\tfor i := 0; i < numGoroutines; i++ {\n\t\t\tgo func() {\n\t\t\t\tdefer wg.Done()\n\t\t\t\t<-start\n\t\t\t\tfor {\n\t\t\t\t\tif CallerOptimisticAdd(store, deltaPerGoroutine) {\n\t\t\t\t\t\tbreak\n\t\t\t\t\t}\n\t\t\t\t}\n\t\t\t}()\n\t\t}\n\n\t\tclose(start)\n\t\twg.Wait()\n\n\t\tval, _ := store.Read()\n\t\texpected := numGoroutines * deltaPerGoroutine\n\t\tif val != expected {\n\t\t\tt.Fatalf(\"Iteration %d: expected value %d, got %d\", iteration, expected, val)\n\t\t}\n\t}\n}",
+        "token_stats": {
+          "prompt": 5477,
+          "completion": 1320,
+          "calls": 6
+        }
+      }
+    },
+    "c04_actorloop": {
+      "package": "c04_actorloop",
+      "ground_truth": "SAFE",
+      "final_detected": false,
+      "specs": {
+        "CallerActorPay": {
+          "precondition": "a != nil && amt >= 0",
+          "postcondition": "returns true if withdrawal succeeded, false otherwise",
+          "rely": "Concurrent actors may send requests to a.ops channel",
+          "guarantee": "Does not corrupt a.ops channel state",
+          "expected_callees": {
+            "Withdraw": "Atomically processes withdrawal request via actor loop"
+          }
+        },
+        "Withdraw": {
+          "precondition": "a != nil && amt >= 0",
+          "postcondition": "returns boolean response from the actor loop indicating success or failure",
+          "rely": "Actor loop goroutine is actively servicing a.ops channel",
+          "guarantee": "Sends valid request struct containing amount and allocated reply channel to a.ops",
+          "expected_callees": {}
+        }
+      },
+      "analysis": {
+        "vulnerable": false,
+        "bug_category": "None",
+        "violated_contract": "None",
+        "interleaving_schedule": [],
+        "test_strategy": "None",
+        "repair_suggestion": "None"
+      },
+      "test_execution": {
+        "package": "c04_actorloop",
+        "compiled": true,
+        "bug_witnessed_by_test": false,
+        "llm_predicted_vulnerable": false,
+        "test_exit_code": 0,
+        "test_output": "ok  \tinterleaveguard/benchmarks/c04_actorloop\t1.376s",
+        "generated_test_code": "package c04_actorloop\n\nimport (\n\t\"sync\"\n\t\"testing\"\n\t\"time\"\n)\n\nfunc TestInterleaveGuardAudit(t *testing.T) {\n\tfor iter := 0; iter < 50; iter++ {\n\t\tinitialBalance := 100\n\t\tledger := NewActorLedger(initialBalance)\n\n\t\tnumGoroutines := 10\n\t\twithdrawAmt := 20\n\t\texpectedSuccesses := initialBalance / withdrawAmt\n\n\t\tstartBarrier := make(chan struct{})\n\t\tvar wg sync.WaitGroup\n\t\twg.Add(numGoroutines)\n\n\t\tsuccessCount := 0\n\t\tvar mu sync.Mutex\n\n\t\tfor i := 0; i < numGoroutines; i++ {\n\t\t\tgo func() {\n\t\t\t\tdefer wg.Done()\n\t\t\t\t<-startBarrier\n\t\t\t\tok := CallerActorPay(ledger, withdrawAmt)\n\t\t\t\tif ok {\n\t\t\t\t\tmu.Lock()\n\t\t\t\t\tsuccessCount++\n\t\t\t\t\tmu.Unlock()\n\t\t\t\t}\n\t\t\t}()\n\t\t}\n\n\t\tclose(startBarrier)\n\n\t\tdone := make(chan struct{})\n\t\tgo func() {\n\t\t\twg.Wait()\n\t\t\tclose(done)\n\t\t}()\n\n\t\tselect {\n\t\tcase <-done:\n\t\t\tif successCount > expectedSuccesses {\n\t\t\t\tt.Fatalf(\"Iteration %d: allowed %d successful withdrawals of %d from initial balance %d, expected at most %d\",\n\t\t\t\t\titer, successCount, withdrawAmt, initialBalance, expectedSuccesses)\n\t\t\t}\n\t\tcase <-time.After(1 * time.Second):\n\t\t\tt.Fatalf(\"Iteration %d: deadlock detected (timeout waiting for goroutines to finish)\", iter)\n\t\t}\n\t}\n}",
+        "token_stats": {
+          "prompt": 7904,
+          "completion": 1962,
+          "calls": 9
+        }
+      }
+    },
+    "c05_cowatomic": {
+      "package": "c05_cowatomic",
+      "ground_truth": "SAFE",
+      "final_detected": false,
+      "specs": {
+        "Update": {
+          "precondition": "r != nil",
+          "postcondition": "r.cur.Load() points to a newly stored RouteTable with the updated host and port",
+          "rely": "Concurrent readers may load old or new RouteTable pointers via atomic load; other writers are serialized via r.mu",
+          "guarantee": "Exclusively locks r.mu and atomically updates r.cur using Store",
+          "expected_callees": {}
+        },
+        "CallerRouteRequest": {
+          "precondition": "r != nil",
+          "postcondition": "returns true if the loaded RouteTable is non-nil with a non-empty Host and positive Port",
+          "rely": "Concurrent updates may occur via r.Update, replacing the RouteTable pointer atomically",
+          "guarantee": "Does not mutate shared router state directly",
+          "expected_callees": {
+            "Get": "Atomically load and return the current RouteTable pointer without data races"
+          }
+        },
+        "Get": {
+          "precondition": "r != nil",
+          "postcondition": "returns the current *RouteTable loaded atomically from r.cur",
+          "rely": "Concurrent writers may update r.cur using atomic Store under mutex protection",
+          "guarantee": "Performs an atomic load on r.cur without introducing data races",
+          "expected_callees": {}
+        }
+      },
+      "analysis": {
+        "vulnerable": false,
+        "bug_category": "None",
+        "violated_contract": "None",
+        "interleaving_schedule": [],
+        "test_strategy": "None",
+        "repair_suggestion": "None"
+      },
+      "test_execution": {
+        "package": "c05_cowatomic",
+        "compiled": true,
+        "bug_witnessed_by_test": false,
+        "llm_predicted_vulnerable": false,
+        "test_exit_code": 0,
+        "test_output": "ok  \tinterleaveguard/benchmarks/c05_cowatomic\t1.499s",
+        "generated_test_code": "package c05_cowatomic\n\nimport (\n\t\"sync\"\n\t\"testing\"\n)\n\nfunc TestInterleaveGuardAudit(t *testing.T) {\n\trouter := NewRouter(\"initial-host\", 8080)\n\n\tfor iter := 0; iter < 50; iter++ {\n\t\tstartChan := make(chan struct{})\n\t\tvar wg sync.WaitGroup\n\t\tnumWorkers := 10\n\t\twg.Add(numWorkers)\n\n\t\tfor i := 0; i < numWorkers; i++ {\n\t\t\tgo func(id int) {\n\t\t\t\tdefer wg.Done()\n\t\t\t\t<-startChan\n\n\t\t\t\tif id%2 == 0 {\n\t\t\t\t\trouter.Update(\"host-updated\", 9090)\n\t\t\t\t} else {\n\t\t\t\t\trt := router.Get()\n\t\t\t\t\tif rt == nil {\n\t\t\t\t\t\tt.Errorf(\"Get() returned nil\")\n\t\t\t\t\t}\n\t\t\t\t}\n\n\t\t\t\t_ = CallerRouteRequest(router)\n\t\t\t}(i)\n\t\t}\n\n\t\tclose(startChan)\n\t\twg.Wait()\n\t}\n}",
+        "token_stats": {
+          "prompt": 10658,
+          "completion": 2587,
+          "calls": 12
+        }
+      }
+    },
+    "c06_semctx": {
+      "package": "c06_semctx",
+      "ground_truth": "SAFE",
+      "final_detected": false,
+      "specs": {
+        "CallerRateLimitedWork": {
+          "precondition": "l != nil, l.sem is initialized",
+          "postcondition": "Returns (7, true) if capacity allows, or (0, false) if context cancelled",
+          "rely": "Concurrent goroutines may send to or receive from l.sem, provided channel capacity invariants are respected",
+          "guarantee": "Does not corrupt limiter state and correctly propagates rate-limited work results",
+          "expected_callees": {
+            "Do": "Executes fn under rate limit via semaphore acquisition or returns false on context cancellation"
+          }
+        },
+        "Do": {
+          "precondition": "l != nil, l.sem is initialized, ctx is non-nil",
+          "postcondition": "Returns (fn(), true) if semaphore acquired, or (0, false) if ctx.Done() closes first",
+          "rely": "Concurrent goroutines may interact with l.sem channel asynchronously",
+          "guarantee": "Ensures semaphore slot is always released via defer upon successful acquisition",
+          "expected_callees": {}
+        }
+      },
+      "analysis": {
+        "vulnerable": false,
+        "bug_category": "None",
+        "violated_contract": "None if safe",
+        "interleaving_schedule": [],
+        "test_strategy": "None",
+        "repair_suggestion": "None"
+      },
+      "test_execution": {
+        "package": "c06_semctx",
+        "compiled": true,
+        "bug_witnessed_by_test": false,
+        "llm_predicted_vulnerable": false,
+        "test_exit_code": 0,
+        "test_output": "ok  \tinterleaveguard/benchmarks/c06_semctx\t1.383s",
+        "generated_test_code": "package c06_semctx\n\nimport (\n\t\"context\"\n\t\"sync\"\n\t\"sync/atomic\"\n\t\"testing\"\n\t\"time\"\n)\n\nfunc TestInterleaveGuardAudit(t *testing.T) {\n\tconst maxConcurrency = 2\n\tconst numGoroutines = 5\n\tlimiter := NewLimiter(maxConcurrency)\n\n\tfor i := 0; i < 50; i++ {\n\t\tvar activeCount int32\n\t\tvar wg sync.WaitGroup\n\t\tstartBarrier := make(chan struct{})\n\t\t\n\t\twg.Add(numGoroutines)\n\t\tfor j := 0; j < numGoroutines; j++ {\n\t\t\tgo func() {\n\t\t\t\tdefer wg.Done()\n\t\t\t\t<-startBarrier\n\t\t\t\t\n\t\t\t\tlimiter.Do(context.Background(), func() int {\n\t\t\t\t\tcurrent := atomic.AddInt32(&activeCount, 1)\n\t\t\t\t\tif current > int32(maxConcurrency) {\n\t\t\t\t\t\tt.Errorf(\"Invariant violated: active concurrency %d exceeds limit %d\", current, maxConcurrency)\n\t\t\t\t\t}\n\t\t\t\t\ttime.Sleep(time.Microsecond)\n\t\t\t\t\tatomic.AddInt32(&activeCount, -1)\n\t\t\t\t\treturn 0\n\t\t\t\t})\n\t\t\t}()\n\t\t}\n\n\t\tclose(startBarrier)\n\t\t\n\t\tdone := make(chan struct{})\n\t\tgo func() {\n\t\t\twg.Wait()\n\t\t\tclose(done)\n\t\t}()\n\n\t\tselect {\n\t\tcase <-done:\n\t\tcase <-time.After(1 * time.Second):\n\t\t\tt.Fatalf(\"Deadlock detected at iteration %d\", i)\n\t\t}\n\t}\n}",
+        "token_stats": {
+          "prompt": 13096,
+          "completion": 3274,
+          "calls": 15
+        }
+      }
+    },
+    "c07_lockedhelper": {
+      "package": "c07_lockedhelper",
+      "ground_truth": "SAFE",
+      "final_detected": false,
+      "specs": {
+        "CallerAtomicRebalance": {
+          "precondition": "l != nil && l.mu is unlocked",
+          "postcondition": "if sufficient checking funds, checking decreased by amt and savings increased by amt with return true; otherwise false, l.mu is unlocked",
+          "rely": "Other goroutines may attempt to access l.checking or l.savings only through methods protected by l.mu",
+          "guarantee": "Preserves consistency of total funds under l.mu ownership",
+          "expected_callees": {
+            "subCheckingLocked": "atomically checks and subtracts amount from checking if sufficient",
+            "addSavingsLocked": "atomically adds amount to savings"
+          }
+        },
+        "CallerTotal": {
+          "precondition": "l != nil && l.mu is unlocked",
+          "postcondition": "returns sum of checking and savings, l.mu is unlocked",
+          "rely": "Other goroutines may only modify ledger fields under l.mu",
+          "guarantee": "Preserves ledger fields and mutex state",
+          "expected_callees": {}
+        },
+        "subCheckingLocked": {
+          "precondition": "l != nil && l.mu is locked by the current goroutine",
+          "postcondition": "if l.checking >= amt, l.checking is reduced by amt and returns true, else returns false",
+          "rely": "Other goroutines cannot access l.checking without holding l.mu",
+          "guarantee": "Maintains l.mu locked state and safely updates checking balance",
+          "expected_callees": {}
+        },
+        "addSavingsLocked": {
+          "precondition": "l != nil && l.mu is locked by the current goroutine",
+          "postcondition": "l.savings is increased by amt",
+          "rely": "Other goroutines cannot access l.savings without holding l.mu",
+          "guarantee": "Maintains l.mu locked state and safely updates savings balance",
+          "expected_callees": {}
+        }
+      },
+      "analysis": {
+        "vulnerable": false,
+        "bug_category": "None",
+        "violated_contract": "None",
+        "interleaving_schedule": [],
+        "test_strategy": "None",
+        "repair_suggestion": "None"
+      },
+      "test_execution": {
+        "package": "c07_lockedhelper",
+        "compiled": true,
+        "bug_witnessed_by_test": false,
+        "llm_predicted_vulnerable": false,
+        "test_exit_code": 0,
+        "test_output": "ok  \tinterleaveguard/benchmarks/c07_lockedhelper\t1.533s",
+        "generated_test_code": "package c07_lockedhelper\n\nimport (\n\t\"sync\"\n\t\"testing\"\n)\n\nfunc TestInterleaveGuardAudit(t *testing.T) {\n\tconst iterations = 50\n\tconst goroutines = 10\n\tconst transfersPerGoroutine = 100\n\tconst transferAmt = 10\n\n\tinitialChecking := goroutines * transfersPerGoroutine * transferAmt\n\tinitialSavings := 0\n\n\tfor i := 0; i < iterations; i++ {\n\t\tledger := NewLedger(initialChecking, initialSavings)\n\t\tinitialTotal := CallerTotal(ledger)\n\n\t\tvar wg sync.WaitGroup\n\t\tstart := make(chan struct{})\n\n\t\tfor g := 0; g < goroutines; g++ {\n\t\t\twg.Add(1)\n\t\t\tgo func() {\n\t\t\t\tdefer wg.Done()\n\t\t\t\t<-start\n\t\t\t\tfor k := 0; k < transfersPerGoroutine; k++ {\n\t\t\t\t\tCallerAtomicRebalance(ledger, transferAmt)\n\t\t\t\t}\n\t\t\t}()\n\t\t}\n\n\t\tclose(start)\n\t\twg.Wait()\n\n\t\tfinalTotal := CallerTotal(ledger)\n\t\tif finalTotal != initialTotal {\n\t\t\tt.Fatalf(\"Iteration %d: invariant violated! Total balance changed from %d to %d\", i, initialTotal, finalTotal)\n\t\t}\n\n\t\tif ledger.checking < 0 || ledger.savings < 0 {\n\t\t\tt.Fatalf(\"Iteration %d: negative balance detected! Checking: %d, Savings: %d\", i, ledger.checking, ledger.savings)\n\t\t}\n\t}\n}",
+        "token_stats": {
+          "prompt": 16288,
+          "completion": 4154,
+          "calls": 18
+        }
+      }
+    },
+    "c08_confinedworker": {
+      "package": "c08_confinedworker",
+      "ground_truth": "SAFE",
+      "final_detected": false,
+      "specs": {
+        "CallerIncrement": {
+          "precondition": "s != nil and s.reqs is initialized and capable of receiving requests",
+          "postcondition": "Returns the updated integer value for the given key after processing delta",
+          "rely": "Other goroutines may send requests to s.reqs but must not close s.reqs prematurely",
+          "guarantee": "Sends a valid opReq to s.reqs and blocks until the corresponding reply is received",
+          "expected_callees": {}
+        },
+        "loop": {
+          "precondition": "s != nil and s.reqs is an active channel owned exclusively by this worker goroutine",
+          "postcondition": "Processes all incoming opReq messages sequentially, updating local confined state and replying",
+          "rely": "Concurrent senders respect the opReq protocol and do not close the reply channel before receiving",
+          "guarantee": "Maintains confined ownership of the internal map state without data races",
+          "expected_callees": {}
+        }
+      },
+      "analysis": {
+        "vulnerable": false,
+        "bug_category": "None",
+        "violated_contract": "None",
+        "interleaving_schedule": [],
+        "test_strategy": "None",
+        "repair_suggestion": "None"
+      },
+      "test_execution": {
+        "package": "c08_confinedworker",
+        "compiled": true,
+        "bug_witnessed_by_test": false,
+        "llm_predicted_vulnerable": false,
+        "test_exit_code": 0,
+        "test_output": "ok  \tinterleaveguard/benchmarks/c08_confinedworker\t1.527s",
+        "generated_test_code": "package c08_confinedworker\n\nimport (\n\t\"sync\"\n\t\"testing\"\n\t\"time\"\n)\n\nfunc TestInterleaveGuardAudit(t *testing.T) {\n\tfor iter := 0; iter < 50; iter++ {\n\t\tstore := NewConfinedStore()\n\t\tconst numGoroutines = 10\n\t\tconst numIncrements = 100\n\n\t\tvar wg sync.WaitGroup\n\t\twg.Add(numGoroutines)\n\n\t\tstart := make(chan struct{})\n\n\t\tfor i := 0; i < numGoroutines; i++ {\n\t\t\tgo func() {\n\t\t\t\tdefer wg.Done()\n\t\t\t\t<-start\n\t\t\t\tfor j := 0; j < numIncrements; j++ {\n\t\t\t\t\tstore.CallerIncrement(\"counter\", 1)\n\t\t\t\t}\n\t\t\t}()\n\t\t}\n\n\t\tclose(start)\n\n\t\tdone := make(chan struct{})\n\t\tgo func() {\n\t\t\twg.Wait()\n\t\t\tclose(done)\n\t\t}()\n\n\t\tselect {\n\t\tcase <-done:\n\t\t\tval := store.CallerIncrement(\"counter\", 0)\n\t\t\texpected := numGoroutines * numIncrements\n\t\t\tif val != expected {\n\t\t\t\tt.Fatalf(\"iteration %d: expected %d, got %d\", iter, expected, val)\n\t\t\t}\n\t\tcase <-time.After(1 * time.Second):\n\t\t\tt.Fatalf(\"iteration %d: deadlock detected (timeout)\", iter)\n\t\t}\n\t}\n}",
+        "token_stats": {
+          "prompt": 18787,
+          "completion": 4777,
+          "calls": 21
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "id": "B10",
+  "category": "Barrier Synchronization Race",
+  "scenario": "WaitGroup Add Inside Child Goroutine",
+  "detected_by_race": true,
+  "rely": "wg.Add(1) completes before wg.Wait() evaluates the counter.",
+  "guarantee": "All spawned tasks finish mutating results before SpawnAndCollect returns.",
+  "interleaving_trigger": "Parent spawns child goroutine and immediately calls wg.Wait() before child executes wg.Add(1)."
+}

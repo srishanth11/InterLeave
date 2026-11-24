@@ -1,0 +1,9 @@
+{
+  "id": "B11",
+  "category": "Deadlock / Goroutine Leak",
+  "scenario": "Unbuffered Channel Send Ignoring Context Timeout",
+  "detected_by_race": false,
+  "rely": "Receiver always reads from resCh even when context expires.",
+  "guarantee": "Worker goroutine terminates and releases lock even if caller cancels context.",
+  "interleaving_trigger": "Caller hits timeout and exits without reading resCh; worker blocks forever at resCh <- val holding mu."
+}

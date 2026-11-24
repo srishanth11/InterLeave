@@ -1,0 +1,9 @@
+{
+  "id": "B08",
+  "category": "Publication Race / Atomicity Violation",
+  "scenario": "Double-Checked Locking Partial Init",
+  "detected_by_race": true,
+  "rely": "Other goroutines do not observe a non-nil r.cfg before Endpoint, MaxRetry, and Ready are set.",
+  "guarantee": "GetConfig returns a fully initialized *ServiceConfig with Ready == true.",
+  "interleaving_trigger": "G1 assigns r.cfg = &ServiceConfig{} and pauses before field initialization; G2 reads r.cfg != nil."
+}
