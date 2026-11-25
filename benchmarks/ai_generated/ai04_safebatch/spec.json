@@ -1,0 +1,10 @@
+{
+  "id": "AI04",
+  "source": "AI-generated (LLM code synthesis prompt: lock-free atomic metrics counter)",
+  "ground_truth_buggy": false,
+  "category": "Safe Control",
+  "scenario": "AI-Generated Lock-Free atomic.Int64 Metrics Collector",
+  "rely": "All updates go through atomic.Int64 methods.",
+  "guarantee": "Monotonic race-free counters.",
+  "interleaving_trigger": "None (Safe)"
+}

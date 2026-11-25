@@ -1,0 +1,10 @@
+{
+  "id": "AI02",
+  "source": "AI-generated (LLM code synthesis prompt: background log flusher with Close)",
+  "ground_truth_buggy": true,
+  "category": "Channel Bug",
+  "scenario": "AI-Generated Check-Closed-Then-Send Panic on Closed Channel",
+  "rely": "Close() does not close f.queue between Log()'s closed check and channel send.",
+  "guarantee": "Log() never panics with send on closed channel.",
+  "interleaving_trigger": "G1 passes f.closed check in Log() and releases f.mu; G2 calls Close() closing f.queue; G1 executes f.queue <- msg and panics."
+}

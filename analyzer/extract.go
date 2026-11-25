@@ -24,6 +24,7 @@ type SyncOp struct {
 
 type FuncInfo struct {
 	Name      string   `json:"name"`
+	Signature string   `json:"signature"`
 	Receiver  string   `json:"receiver,omitempty"`
 	StartLine int      `json:"start_line"`
 	EndLine   int      `json:"end_line"`
@@ -34,13 +35,18 @@ type FuncInfo struct {
 }
 
 type AnalysisResult struct {
-	Package   string       `json:"package"`
-	File      string       `json:"file"`
-	Structs   []StructInfo `json:"structs"`
-	Functions []FuncInfo   `json:"functions"`
+	Package    string       `json:"package"`
+	File       string       `json:"file"`
+	Imports    []string     `json:"imports"`
+	FullSource string       `json:"full_source"`
+	Structs    []StructInfo `json:"structs"`
+	Functions  []FuncInfo   `json:"functions"`
 }
 
 func exprToString(fset *token.FileSet, expr ast.Expr) string {
+	if expr == nil {
+		return ""
+	}
 	var buf bytes.Buffer
 	_ = printer.Fprint(&buf, fset, expr)
 	return buf.String()
@@ -66,8 +72,16 @@ func main() {
 	}
 
 	res := AnalysisResult{
-		Package: file.Name.Name,
-		File:    filePath,
+		Package:    file.Name.Name,
+		File:       filePath,
+		Imports:    []string{},
+		FullSource: string(srcBytes),
+		Structs:    []StructInfo{},
+		Functions:  []FuncInfo{},
+	}
+
+	for _, imp := range file.Imports {
+		res.Imports = append(res.Imports, strings.Trim(imp.Path.Value, `"`))
 	}
 
 	funcMap := make(map[string]*FuncInfo)
@@ -92,6 +106,9 @@ func main() {
 				}
 				for _, field := range st.Fields.List {
 					typeStr := exprToString(fset, field.Type)
+					if len(field.Names) == 0 {
+						sInfo.Fields[typeStr] = typeStr
+					}
 					for _, name := range field.Names {
 						sInfo.Fields[name.Name] = typeStr
 					}
@@ -113,9 +130,11 @@ func main() {
 		startPos := fset.Position(fnDecl.Pos())
 		endPos := fset.Position(fnDecl.End())
 		codeSnippet := string(srcBytes[startPos.Offset:endPos.Offset])
+		sigLine := strings.SplitN(codeSnippet, "{", 2)[0]
 
 		fInfo := &FuncInfo{
 			Name:      fnDecl.Name.Name,
+			Signature: strings.TrimSpace(sigLine),
 			Receiver:  recv,
 			StartLine: startPos.Line,
 			EndLine:   endPos.Line,
@@ -132,6 +151,7 @@ func main() {
 		"Lock": true, "Unlock": true, "RLock": true, "RUnlock": true,
 		"Wait": true, "Signal": true, "Broadcast": true,
 		"Add": true, "Done": true, "Load": true, "Store": true, "Do": true,
+		"CompareAndSwap": true, "Swap": true, "Reset": true, "Stop": true, "close": true,
 	}
 
 	// Pass 2: Extract Call Graph Edges & Synchronization Primitives

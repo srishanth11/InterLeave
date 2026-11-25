@@ -1,3 +1,3 @@
-module interleaveguard/benchmarks
+module interleave-guard/benchmarks
 
-go 1.27.4
+go 1.21

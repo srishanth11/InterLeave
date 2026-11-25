@@ -1,0 +1,33 @@
+{
+  "total_benchmarks": 4,
+  "buggy_count": 2,
+  "safe_count": 2,
+  "predictive": {
+    "tp": 2,
+    "fp": 0,
+    "tn": 2,
+    "fn": 0,
+    "precision": 1.0,
+    "recall": 1.0,
+    "f1": 1.0,
+    "fpr": 0.0,
+    "runtime_sec": 224.97,
+    "tokens": 82553,
+    "llm_calls": 27
+  },
+  "empirical": {
+    "tp": 0,
+    "fp": 0,
+    "tn": 2,
+    "fn": 2,
+    "precision": 0.0,
+    "recall": 0.0,
+    "f1": 0.0,
+    "fpr": 0.0,
+    "runtime_sec": 224.97,
+    "tokens": 82553,
+    "llm_calls": 27
+  },
+  "failing_tests_reproduced": 0,
+  "failing_test_rate_pct": 0.0
+}

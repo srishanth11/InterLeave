@@ -1,3 +1,3 @@
-module interleaveguard
+module interleave-guard
 
-go 1.27.4
+go 1.21

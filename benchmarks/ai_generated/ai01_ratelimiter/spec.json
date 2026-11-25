@@ -1,0 +1,10 @@
+{
+  "id": "AI01",
+  "source": "AI-generated (LLM code synthesis prompt: sliding-window token bucket rate limiter)",
+  "ground_truth_buggy": true,
+  "category": "Atomicity Violation",
+  "scenario": "AI-Generated Split-Lock Token Bucket Over-Consumption",
+  "rely": "No concurrent AllowRequest consumes tokens between Available() and Consume().",
+  "guarantee": "tb.tokens never drops below 0.",
+  "interleaving_trigger": "Two concurrent AllowRequest(tb, 1) calls both observe Available() == 1 before either calls Consume(1)."
+}

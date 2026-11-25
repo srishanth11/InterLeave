@@ -1,30 +1,137 @@
-# InterleaveGuard Evaluation & Audit Report
+# InterLeave Evaluation & Formal Concurrency Audit Report
 
-## Comparative Benchmark Metrics (18 Go Concurrency Scenarios: 12 Buggy, 6 Safe)
+## 1. Seeded Benchmark Comparison (26 Scenarios: 18 Buggy, 8 Safe)
 
-| Method / Ablation | TP | FP | TN | FN | Precision | Recall | F1 Score | Runtime (s) | Total Tokens |
-|---|---|---|---|---|---|---|---|---|---|
-| 1. go test -race (Baseline) | 1 | 0 | 8 | 17 | 1.00 | 0.06 | 0.11 | 2.2s | 0 |
-| 2. Random Stress (-count=25) | 3 | 0 | 8 | 15 | 1.00 | 0.17 | 0.29 | 42.6s | 0 |
-| 3. LLM Impl-Only (Ablation) | 18 | 1 | 7 | 0 | 0.95 | 1.00 | 0.97 | 0.0s | 0 |
-| 4. InterleaveGuard (Full RG + TestGen) | 18 | 0 | 8 | 0 | 1.00 | 1.00 | 1.00 | 546.3s | 23564 |
+| Method / Ablation | TP | FP | TN | FN | Precision | Recall | F1 | FPR | Failing Tests | Runtime (s) | Tokens | Calls |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1. Go Race Detector (go test -race) | 3 | 1 | 7 | 15 | 0.750 | 0.167 | 0.273 | 0.125 | N/A | 11.2s | 0 | 0 |
+| 2. Random Stress (-count=25) | 4 | 1 | 7 | 14 | 0.800 | 0.222 | 0.348 | 0.125 | N/A | 16.5s | 0 | 0 |
+| 3. LLM-Only (Raw Go Review) | 14 | 1 | 7 | 4 | 0.933 | 0.778 | 0.849 | 0.125 | N/A | 132.5s | 7044 | 26 |
+| 4. Ablation: InterLeave w/o Caller Specs (Empirical) | 11 | 1 | 7 | 7 | 0.917 | 0.611 | 0.733 | 0.125 | 11/18 (61.1%) | 1813.2s | 185653 | 94 |
+| 5a. Full InterLeave (Static RG Prediction) | 16 | 4 | 4 | 2 | 0.800 | 0.889 | 0.842 | 0.500 | N/A | 5098.5s | 342091 | 133 |
+| 5b. Full InterLeave (Empirical Test Reproduction) | 7 | 1 | 7 | 11 | 0.875 | 0.389 | 0.538 | 0.125 | 7/18 (38.9%) | 5098.5s | 342091 | 133 |
 
-## Detailed Per-Benchmark Audit Findings
+## 2. InterLeave Pipeline Quality & Reproducibility Metrics
+- **Candidate Specifications Generated:** 250 total (9.6/pkg) — Correct: 92, Partially Correct: 76, Incorrect: 82
+- **Specification Correctness Rate:** **52.0%** (strict: 36.8%)
+- **Test Compilation Success Rate:** **88.5%** (23/26)
+- **Test Execution Success Rate:** **88.5%** (23/26)
+- **Failing-Test Generation Rate (on Buggy Benchmarks):** **38.9%** (7/18)
+- **Mean Reproduction Rate (across 5 repeated runs on reproduced bugs):** **94.3%** (Deterministic: 6, Probabilistic: 1)
+- **Interleavings Explored:** Proposed=33, AST-Validated=28, Executed=28
+- **Mean Time to First Failure (TTFF):** **88.88s**
 
-## Package `b01_bank` — **VULNERABLE**
-- **Ground Truth:** `BUGGY` | **Detected:** `True`
+## 3. Separate Evaluation: AI-Generated Go Code Benchmarks
+- **Total AI-Generated Scenarios:** 4 (2 Buggy, 2 Safe)
+- **Empirical Reproduction Metrics:** TP=0, FP=0, TN=2, FN=2 | Precision=0.000, Recall=0.000, F1=0.000
+- **Failing-Test Generation Rate:** 0/2 (0.0%)
+
+## Package `ai01_ratelimiter` — **SUSPECTED (UNREPRODUCED)**
+- **Ground Truth:** `BUGGY` | **Predicted Vulnerable:** `True` | **Empirically Reproduced:** `False`
 - **Bug Category:** Atomicity Violation
-- **Violated Rely-Guarantee Contract:** ProcessWithdraw expects check-then-act (GetBalance followed by Deduct) to be atomic, but individual method calls release and re-acquire the lock, creating a split-lock race condition.
-- **Empirical Test Witnessed Bug:** `False` (Compiled: `True`)
+- **Violated Rely-Guarantee Contract:** AllowRequest may return true while tb.tokens becomes negative, breaking the postcondition that tokens are decreased by cost relative to the value observed in Available and violating the invariant tb.tokens >= 0
+- **Specification Validation:** `Partially Correct` (66.67% weighted across 3 candidates)
+- **Test Pipeline:** Compiled=`False` | Executed=`False` | Reproducibility=`0/0 (0.0%, Unreproduced)`
+- **Interleavings & TTFF:** Considered=`4` | Validated=`4` | Executed=`2` | TTFF=`Nones`
 
-### Adversarial Interleaving Schedule
-1. **[G1]** ProcessWithdraw calls a.GetBalance(); acquires mu, reads balance = 100, releases mu.
-2. **[G2]** ProcessWithdraw calls a.Deduct(100); acquires mu, deducts 100, balance becomes 0, releases mu.
-3. **[G1]** Resumes ProcessWithdraw with stored balance 100 >= amt (100). Calls a.Deduct(100), balance becomes -100 (overdraws).
+### Validated Interleaving Schedule
+1. **[G1]** (`AllowRequest`) calls tb.Available()
+2. **[G1]** (`Available`) locks tb.mu, reads tokens=5, unlocks
+3. **[G2]** (`Consume`) locks tb.mu, subtracts 5 (tokens becomes 0), unlocks
+4. **[G1]** (`Consume`) locks tb.mu, subtracts 5 (tokens becomes -5), unlocks
+5. **[G1]** (`AllowRequest`) returns true
 
 ### Recommended Repair
-Add a Withdraw method on Account that holds the mutex continuously across the check and deduction:
-func (a *Account) Withdraw(amt int) bool {
+Serialize the check‑and‑consume under a single lock. For example, replace AllowRequest with:
+
+func (tb *TokenBucket) TryConsume(cost int) bool {
+    tb.mu.Lock()
+    defer tb.mu.Unlock()
+    if tb.tokens >= cost {
+        tb.tokens -= cost
+        return true
+    }
+    return false
+}
+
+Then have callers use tb.TryConsume(cost) instead of the separate Available/Consume pair. This eliminates the check‑then‑act gap and guarantees the invariant tb.tokens >= 0.
+
+---
+
+## Package `ai02_cacheclose` — **SUSPECTED (UNREPRODUCED)**
+- **Ground Truth:** `BUGGY` | **Predicted Vulnerable:** `True` | **Empirically Reproduced:** `False`
+- **Bug Category:** Channel Bug
+- **Violated Rely-Guarantee Contract:** Send on closed channel panic due to check-then-act gap in AsyncFlusher.Log
+- **Specification Validation:** `Incorrect` (0.0% weighted across 22 candidates)
+- **Test Pipeline:** Compiled=`False` | Executed=`False` | Reproducibility=`0/0 (0.0%, Unreproduced)`
+- **Interleavings & TTFF:** Considered=`1` | Validated=`1` | Executed=`1` | TTFF=`Nones`
+
+### Validated Interleaving Schedule
+1. **[G1]** (`AsyncFlusher.Log`) Acquires f.mu.Lock() and reads f.closed as false.
+2. **[G1]** (`AsyncFlusher.Log`) Releases f.mu.Unlock().
+3. **[G2]** (`AsyncFlusher.Close`) Acquires f.mu.Lock(), sets f.closed = true, and executes close(f.queue).
+4. **[G2]** (`AsyncFlusher.Close`) Releases f.mu.Unlock().
+5. **[G1]** (`AsyncFlusher.Log`) Attempts to send msg to f.queue, which is now closed, causing a panic.
+
+### Recommended Repair
+Move the channel send operation inside the critical section protected by f.mu in AsyncFlusher.Log, or use a select statement with a done channel to safely handle the close race.
+
+---
+
+## Package `ai03_safecircuit` — **SAFE (VERIFIED)**
+- **Ground Truth:** `SAFE` | **Predicted Vulnerable:** `False` | **Empirically Reproduced:** `False`
+- **Bug Category:** None
+- **Violated Rely-Guarantee Contract:** None
+- **Specification Validation:** `Partially Correct` (92.31% weighted across 13 candidates)
+- **Test Pipeline:** Compiled=`False` | Executed=`False` | Reproducibility=`0/0 (0.0%, Unreproduced)`
+- **Interleavings & TTFF:** Considered=`0` | Validated=`0` | Executed=`1` | TTFF=`Nones`
+
+### Validated Interleaving Schedule
+
+### Recommended Repair
+None
+
+---
+
+## Package `ai04_safebatch` — **SAFE (VERIFIED)**
+- **Ground Truth:** `SAFE` | **Predicted Vulnerable:** `False` | **Empirically Reproduced:** `False`
+- **Bug Category:** None
+- **Violated Rely-Guarantee Contract:** None
+- **Specification Validation:** `Partially Correct` (70.0% weighted across 10 candidates)
+- **Test Pipeline:** Compiled=`False` | Executed=`False` | Reproducibility=`0/0 (0.0%, Unreproduced)`
+- **Interleavings & TTFF:** Considered=`2` | Validated=`2` | Executed=`1` | TTFF=`Nones`
+
+### Validated Interleaving Schedule
+1. **[G1]** (`IncRequest`) Executes m.requests.Add(1)
+2. **[G2]** (`IncError`) Executes m.errors.Add(1)
+3. **[G1]** (`IncRequest`) Executes m.requests.Add(1)
+4. **[G2]** (`IncError`) Executes m.errors.Add(1)
+
+### Recommended Repair
+No repair needed. The implementation correctly uses atomic operations for all shared state modifications and reads, ensuring thread safety without locks.
+
+---
+
+## 4. Detailed Per-Benchmark Audit Findings (Seeded Suite)
+
+## Package `b01_bank` — **REPRODUCED BUG**
+- **Ground Truth:** `BUGGY` | **Predicted Vulnerable:** `True` | **Empirically Reproduced:** `True`
+- **Bug Category:** Atomicity Violation
+- **Violated Rely-Guarantee Contract:** ProcessWithdraw expects check-then-act to be atomic, but releasing the lock between GetBalance and Deduct allows a concurrent transaction to withdraw funds, leading to a check-then-act race and potential invalid state/overdraft.
+- **Specification Validation:** `Partially Correct` (90.0% weighted across 10 candidates)
+- **Test Pipeline:** Compiled=`True` | Executed=`True` | Reproducibility=`5/5 (100.0%, Deterministic)`
+- **Interleavings & TTFF:** Considered=`1` | Validated=`1` | Executed=`1` | TTFF=`6.66s`
+
+### Validated Interleaving Schedule
+1. **[G1]** (`ProcessWithdraw`) Calls a.GetBalance(), which locks a.mu, reads balance as 100, unlocks a.mu.
+2. **[G2]** (`ProcessWithdraw`) Calls a.GetBalance(), which locks a.mu, reads balance as 100, unlocks a.mu.
+3. **[G1]** (`ProcessWithdraw`) Proceeds to call a.Deduct(100), which locks a.mu, sets balance to 0, unlocks a.mu.
+4. **[G2]** (`ProcessWithdraw`) Proceeds to call a.Deduct(100), which locks a.mu, sets balance to -100, unlocks a.mu.
+
+### Recommended Repair
+Combine balance check and deduction into a single method protected by a.mu:
+
+func (a *Account) ProcessWithdraw(amt int) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.balance >= amt {
@@ -36,465 +143,494 @@ func (a *Account) Withdraw(amt int) bool {
 
 ---
 
-## Package `b02_seat` — **VULNERABLE**
-- **Ground Truth:** `BUGGY` | **Detected:** `True`
+## Package `b02_seat` — **SUSPECTED (UNREPRODUCED)**
+- **Ground Truth:** `BUGGY` | **Predicted Vulnerable:** `True` | **Empirically Reproduced:** `False`
 - **Bug Category:** Atomicity Violation
-- **Violated Rely-Guarantee Contract:** Reserve expects IsFree and Book to act as a single atomic compound operation, but the mutex is released between IsFree and Book, leading to a check-then-act race gap.
-- **Empirical Test Witnessed Bug:** `True` (Compiled: `True`)
+- **Violated Rely-Guarantee Contract:** Reserve assumes check-then-act is atomic, but IsFree and Book release and re-acquire the mutex between operations, creating a split-lock race condition.
+- **Specification Validation:** `Partially Correct` (95.0% weighted across 10 candidates)
+- **Test Pipeline:** Compiled=`True` | Executed=`True` | Reproducibility=`0/5 (0.0%, Unreproduced)`
+- **Interleavings & TTFF:** Considered=`1` | Validated=`1` | Executed=`1` | TTFF=`Nones`
 
-### Adversarial Interleaving Schedule
-1. **[G1]** CallerCheckoutSeat calls Reserve(s, 1, "Alice"), which calls s.IsFree(1). G1 acquires s.mu, finds seat 1 free, and releases s.mu.
-2. **[G2]** Concurrent goroutine G2 calls Reserve(s, 1, "Bob"). G2 acquires s.mu, finds seat 1 free, books it for "Bob", and releases s.mu.
-3. **[G1]** G1 resumes Reserve, proceeds to s.Book(1, "Alice"), acquiring s.mu and overwriting Bob's reservation with Alice's without re-verifying if the seat is still free.
+### Validated Interleaving Schedule
+1. **[G1]** (`Reserve`) Calls s.IsFree(seat), which acquires s.mu, finds seat free, releases s.mu, and returns true.
+2. **[G2]** (`Reserve`) Calls s.IsFree(seat), which acquires s.mu, finds seat still free, releases s.mu, and returns true.
+3. **[G2]** (`Reserve`) Calls s.Book(seat, "Passenger2"), acquiring s.mu and setting s.seats[seat] = "Passenger2".
+4. **[G1]** (`Reserve`) Resumes and calls s.Book(seat, "Passenger1"), acquiring s.mu and overwriting s.seats[seat] = "Passenger1".
 
 ### Recommended Repair
-Introduce an atomic Reserve method that holds the mutex across both the check and the write:
-
-func (s *SeatMap) Reserve(seat int, passenger string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, taken := s.seats[seat]; taken {
-		return false
-	}
-	s.seats[seat] = passenger
-	return true
-}
+Combine IsFree and Book into a single method protected by a single lock acquisition in Reserve, or provide a method on SeatMap such as func (s *SeatMap) Reserve(seat int, passenger string) bool that performs both the check and the write inside one s.mu.Lock() / s.mu.Unlock() block.
 
 ---
 
-## Package `b03_counter` — **VULNERABLE**
-- **Ground Truth:** `BUGGY` | **Detected:** `True`
+## Package `b03_counter` — **REPRODUCED BUG**
+- **Ground Truth:** `BUGGY` | **Predicted Vulnerable:** `True` | **Empirically Reproduced:** `True`
 - **Bug Category:** Atomicity Violation
-- **Violated Rely-Guarantee Contract:** Increment expects to atomically increment c.count, but releases and re-acquires c.mu between Get() and Set(), creating a check-then-act race condition.
-- **Empirical Test Witnessed Bug:** `True` (Compiled: `True`)
+- **Violated Rely-Guarantee Contract:** Increment does not guarantee atomic update of c.count relative to external observers, leading to lost updates.
+- **Specification Validation:** `Partially Correct` (60.0% weighted across 10 candidates)
+- **Test Pipeline:** Compiled=`True` | Executed=`True` | Reproducibility=`3/5 (60.0%, Probabilistic)`
+- **Interleavings & TTFF:** Considered=`1` | Validated=`1` | Executed=`1` | TTFF=`12.127s`
 
-### Adversarial Interleaving Schedule
-1. **[G1]** Calls Increment(c), which calls c.Get(). G1 locks c.mu, reads c.count (e.g., 0), unlocks c.mu.
-2. **[G2]** Calls Increment(c). G2 locks c.mu, reads c.count (0), sets c.count to 1, unlocks c.mu.
-3. **[G1]** Resumes Increment(c), calls c.Set(curr + 1) where curr was 0. G1 sets c.count to 1, overwriting G2's update.
+### Validated Interleaving Schedule
+1. **[G1]** (`Increment`) Calls Get() and receives value 10
+2. **[G2]** (`Increment`) Calls Get() and receives value 10
+3. **[G1]** (`Increment`) Calls Set(11)
+4. **[G2]** (`Increment`) Calls Set(11)
 
 ### Recommended Repair
-Combine Get and Set into a single method protected by one critical section, or add a method: func (c *HitsCounter) Increment() { c.mu.Lock(); defer c.mu.Unlock(); c.count++ }
+Add a new method 'IncrementAtomic' to the HitsCounter struct that performs the read and write within a single c.mu.Lock() / c.mu.Unlock() block, or expose a method that accepts a mutation function.
 
 ---
 
-## Package `b04_deadlock` — **VULNERABLE**
-- **Ground Truth:** `BUGGY` | **Detected:** `True`
+## Package `b04_deadlock` — **SUSPECTED (UNREPRODUCED)**
+- **Ground Truth:** `BUGGY` | **Predicted Vulnerable:** `True` | **Empirically Reproduced:** `False`
 - **Bug Category:** Deadlock
-- **Violated Rely-Guarantee Contract:** Transfer relies on other goroutines not locking in a conflicting order, but the implementation lacks a global lock ordering strategy (e.g., sorting by memory address).
-- **Empirical Test Witnessed Bug:** `False` (Compiled: `True`)
+- **Violated Rely-Guarantee Contract:** Transfer(from, to) assumes a global lock ordering, but CallerPeerPayment allows arbitrary pairs, leading to AB-BA deadlock.
+- **Specification Validation:** `Partially Correct` (80.0% weighted across 10 candidates)
+- **Test Pipeline:** Compiled=`True` | Executed=`True` | Reproducibility=`0/5 (0.0%, Unreproduced)`
+- **Interleavings & TTFF:** Considered=`1` | Validated=`1` | Executed=`1` | TTFF=`Nones`
 
-### Adversarial Interleaving Schedule
-1. **[G1]** Transfer(walletA, walletB, 10) calls walletA.mu.Lock()
-2. **[G2]** Transfer(walletB, walletA, 10) calls walletB.mu.Lock()
-3. **[G1]** Attempts to call walletB.mu.Lock() and blocks
-4. **[G2]** Attempts to call walletA.mu.Lock() and blocks (Deadlock)
+### Validated Interleaving Schedule
+1. **[G1]** (`Transfer`) Acquires from.mu (Wallet A)
+2. **[G2]** (`Transfer`) Acquires from.mu (Wallet B)
+3. **[G1]** (`Transfer`) Attempts to acquire to.mu (Wallet B) and blocks
+4. **[G2]** (`Transfer`) Attempts to acquire to.mu (Wallet A) and blocks
 
 ### Recommended Repair
-Implement lock ordering based on memory addresses: if uintptr(unsafe.Pointer(from)) < uintptr(unsafe.Pointer(to)) { from.mu.Lock(); to.mu.Lock() } else { to.mu.Lock(); from.mu.Lock() }
+Implement a deterministic lock ordering based on memory addresses: if uintptr(unsafe.Pointer(from)) < uintptr(unsafe.Pointer(to)) { from.mu.Lock(); to.mu.Lock() } else { to.mu.Lock(); from.mu.Lock() }
 
 ---
 
-## Package `b05_chanclose` — **VULNERABLE**
-- **Ground Truth:** `BUGGY` | **Detected:** `True`
-- **Bug Category:** Atomicity Violation
-- **Violated Rely-Guarantee Contract:** Publish relies on b.ch not being closed while executing, but the check-then-act gap between b.closed.Load() and b.ch <- msg allows a concurrent Shutdown to close the channel, causing a panic.
-- **Empirical Test Witnessed Bug:** `False` (Compiled: `True`)
+## Package `b05_chanclose` — **SUSPECTED (UNREPRODUCED)**
+- **Ground Truth:** `BUGGY` | **Predicted Vulnerable:** `True` | **Empirically Reproduced:** `False`
+- **Bug Category:** Channel Bug
+- **Violated Rely-Guarantee Contract:** Publish check-then-act gap: between b.closed.Load() checking false and b.ch <- msg executing, another goroutine can call Shutdown(), closing b.ch and causing a panic due to sending on a closed channel.
+- **Specification Validation:** `Correct` (100.0% weighted across 10 candidates)
+- **Test Pipeline:** Compiled=`False` | Executed=`False` | Reproducibility=`0/0 (0.0%, Unreproduced)`
+- **Interleavings & TTFF:** Considered=`1` | Validated=`1` | Executed=`1` | TTFF=`Nones`
 
-### Adversarial Interleaving Schedule
-1. **[G1 (Publish)]** b.closed.Load() returns false
-2. **[G2 (Shutdown)]** b.once.Do executes, sets b.closed=true, and closes b.ch
-3. **[G1 (Publish)]** b.ch <- msg executes on a closed channel, causing a panic
+### Validated Interleaving Schedule
+1. **[G1]** (`Publish`) Executes b.closed.Load(), which returns false (channel is still open).
+2. **[G2]** (`Shutdown`) Invokes sync.Once, stores b.closed = true, and calls close(b.ch).
+3. **[G1]** (`Publish`) Executes b.ch <- msg, attempting to send on the now-closed channel.
 
 ### Recommended Repair
-The channel cannot be safely protected by an atomic bool alone because the channel operation is not atomic with the check. Use a sync.RWMutex to protect the channel send and the closed state, or use a select statement with a 'done' channel to signal shutdown instead of closing the data channel.
+To fix the check-then-act race between b.closed.Load() and b.ch <- msg, either protect the send using a mutex combined with the closed flag, or handle send on closed channel via recover or by redesigning the event bus synchronization.
 
 ---
 
-## Package `b06_rwupgrade` — **VULNERABLE**
-- **Ground Truth:** `BUGGY` | **Detected:** `True`
+## Package `b06_rwupgrade` — **SUSPECTED (UNREPRODUCED)**
+- **Ground Truth:** `BUGGY` | **Predicted Vulnerable:** `True` | **Empirically Reproduced:** `False`
 - **Bug Category:** Deadlock
-- **Violated Rely-Guarantee Contract:** Inconsistent lock acquisition order between GetOrRefresh and PushUpdate
-- **Empirical Test Witnessed Bug:** `False` (Compiled: `True`)
+- **Violated Rely-Guarantee Contract:** Lock acquisition order must be consistent across all methods to prevent circular wait dependencies.
+- **Specification Validation:** `Partially Correct` (45.0% weighted across 10 candidates)
+- **Test Pipeline:** Compiled=`True` | Executed=`True` | Reproducibility=`0/5 (0.0%, Unreproduced)`
+- **Interleavings & TTFF:** Considered=`1` | Validated=`1` | Executed=`1` | TTFF=`Nones`
 
-### Adversarial Interleaving Schedule
-1. **[G1]** Caller calls GetOrRefresh(key), acquires c.mu (line 25)
-2. **[G2]** Caller calls PushUpdate(key, val), acquires c.store.mu (line 42)
-3. **[G1]** G1 attempts to acquire c.store.mu (line 31) and blocks waiting for G2
-4. **[G2]** G2 attempts to acquire c.mu (line 45) and blocks waiting for G1, resulting in a classic lock-ordering deadlock
+### Validated Interleaving Schedule
+1. **[G1]** (`GetOrRefresh`) Acquires c.mu.Lock()
+2. **[G2]** (`PushUpdate`) Acquires c.store.mu.Lock()
+3. **[G1]** (`GetOrRefresh`) Attempts to acquire c.store.mu.Lock() (blocked by G2)
+4. **[G2]** (`PushUpdate`) Attempts to acquire c.mu.Lock() (blocked by G1)
 
 ### Recommended Repair
-Ensure a consistent lock acquisition order across all methods. For example, always acquire c.mu before c.store.mu in both GetOrRefresh and PushUpdate, or redesign the locking hierarchy so that nested locks are avoided.
+Standardize the lock acquisition order in PushUpdate to match GetOrRefresh: acquire c.mu first, then c.store.mu. Alternatively, use a single mutex if the granularity allows, or ensure all methods follow the same hierarchy (e.g., always c.mu then c.store.mu).
 
 ---
 
-## Package `b07_condlost` — **VULNERABLE**
-- **Ground Truth:** `BUGGY` | **Detected:** `True`
+## Package `b07_condlost` — **REPRODUCED BUG**
+- **Ground Truth:** `BUGGY` | **Predicted Vulnerable:** `True` | **Empirically Reproduced:** `True`
 - **Bug Category:** Condition Variable Bug
-- **Violated Rely-Guarantee Contract:** Dequeue uses 'if len(q.items) == 0' instead of a 'for' loop for condition predicate checking, leading to lost wakeups and spurious wakeups.
-- **Empirical Test Witnessed Bug:** `False` (Compiled: `True`)
+- **Violated Rely-Guarantee Contract:** Dequeue uses 'if' instead of 'for' to check condition, leading to lost wakeups or index out of bounds if multiple consumers exist or spurious wakeups occur.
+- **Specification Validation:** `Partially Correct` (65.0% weighted across 10 candidates)
+- **Test Pipeline:** Compiled=`True` | Executed=`True` | Reproducibility=`5/5 (100.0%, Deterministic)`
+- **Interleavings & TTFF:** Considered=`1` | Validated=`1` | Executed=`1` | TTFF=`185.651s`
 
-### Adversarial Interleaving Schedule
-1. **[G1 (Dequeue)]** Acquires q.mu, checks len(q.items) == 0 (true), and calls q.cond.Wait() which releases the lock and blocks.
-2. **[G2 (Enqueue)]** Acquires q.mu, appends an item, releases q.mu, and calls q.cond.Signal(). G1 is woken up.
-3. **[G3 (Dequeue)]** Intervenes before G1 reacquires the lock or finishes, calls Dequeue, acquires q.mu, consumes the item from q.items, and releases q.mu.
-4. **[G1 (Dequeue)]** Reacquires q.mu after being signaled, but proceeds directly to access q.items[0] without re-checking the condition. Since G3 already took the item, q.items is empty again, causing a panic (index out of range) or returning an incorrect value.
+### Validated Interleaving Schedule
+1. **[G1]** (`Dequeue`) Acquires lock, finds items empty, calls q.cond.Wait()
+2. **[G2]** (`Enqueue`) Appends item, calls q.cond.Signal()
+3. **[G3]** (`Dequeue`) Acquires lock, consumes the item, releases lock
+4. **[G1]** (`Dequeue`) Wakes up, proceeds to q.items[0] without re-checking length
 
 ### Recommended Repair
-Replace the 'if' statement in Dequeue with a 'for' loop to re-check the predicate upon waking up: 
-
-func (q *TaskQueue) Dequeue() int {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	for len(q.items) == 0 {
-		q.cond.Wait()
-	}
-	item := q.items[0]
-	q.items = q.items[1:]
-	return item
-}
+Change the 'if' statement in Dequeue to a 'for' loop: for len(q.items) == 0 { q.cond.Wait() }
 
 ---
 
-## Package `b08_dclinit` — **VULNERABLE**
-- **Ground Truth:** `BUGGY` | **Detected:** `True`
+## Package `b08_dclinit` — **REPRODUCED BUG**
+- **Ground Truth:** `BUGGY` | **Predicted Vulnerable:** `True` | **Empirically Reproduced:** `True`
 - **Bug Category:** Data Race
-- **Violated Rely-Guarantee Contract:** Double-checked locking without proper memory barriers or full mutex protection (Check-then-act / data race on r.cfg)
-- **Empirical Test Witnessed Bug:** `True` (Compiled: `True`)
+- **Violated Rely-Guarantee Contract:** The check-then-act pattern in GetConfig is vulnerable to a data race because the initial check 'if r.cfg != nil' is performed outside the mutex lock, allowing a caller to observe a partially initialized ServiceConfig object.
+- **Specification Validation:** `Partially Correct` (65.0% weighted across 10 candidates)
+- **Test Pipeline:** Compiled=`True` | Executed=`True` | Reproducibility=`5/5 (100.0%, Deterministic)`
+- **Interleavings & TTFF:** Considered=`1` | Validated=`1` | Executed=`1` | TTFF=`73.434s`
 
-### Adversarial Interleaving Schedule
-1. **[G1]** GetConfig checks r.cfg != nil without holding r.mu (line 17)
-2. **[G2]** GetConfig acquires r.mu.Lock() and initializes r.cfg (lines 20-27)
-3. **[G1]** G1 reads r.cfg fields or returns r.cfg while G2 was writing to it, causing an uncoordinated read-write data race on ServiceConfig fields.
+### Validated Interleaving Schedule
+1. **[G1]** (`GetConfig`) Acquire r.mu.Lock(), set r.cfg = &ServiceConfig{}, then pause before setting fields.
+2. **[G2]** (`GetConfig`) Check 'if r.cfg != nil' (returns true), return the pointer to the uninitialized ServiceConfig.
+3. **[G2]** (`CallerExecuteRPC`) Access c.Ready (false) and c.Endpoint (""), causing the RPC to fail or panic.
 
 ### Recommended Repair
-Remove the unsafe check outside the lock and use standard mutex protection or sync.Once for initialization: 
-func (r *Registry) GetConfig() *ServiceConfig {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.cfg == nil {
-		r.cfg = &ServiceConfig{
-			Endpoint: "https://api.internal:8443",
-			MaxRetry: 3,
-			Ready:    true,
-		}
-	}
-	return r.cfg
-}
+Use sync.Once to handle the lazy initialization, or move the 'if r.cfg != nil' check inside the mutex lock (Double-Checked Locking is unsafe in Go without memory barriers/atomic pointers).
 
 ---
 
-## Package `b09_crosslock` — **VULNERABLE**
-- **Ground Truth:** `BUGGY` | **Detected:** `True`
+## Package `b09_crosslock` — **REPRODUCED BUG**
+- **Ground Truth:** `BUGGY` | **Predicted Vulnerable:** `True` | **Empirically Reproduced:** `True`
 - **Bug Category:** Atomicity Violation
-- **Violated Rely-Guarantee Contract:** Rebalance updates src and dst in two separate lock/unlock critical sections, leaving an intermediate window where neither the sum invariant holds globally nor is the multi-warehouse transfer atomic.
-- **Empirical Test Witnessed Bug:** `False` (Compiled: `True`)
+- **Violated Rely-Guarantee Contract:** CallerAuditInventory expects a consistent snapshot of the combined inventory, but Rebalance performs two separate atomic operations, allowing an intermediate state where the total sum is temporarily incorrect.
+- **Specification Validation:** `Partially Correct` (75.0% weighted across 10 candidates)
+- **Test Pipeline:** Compiled=`True` | Executed=`True` | Reproducibility=`5/5 (100.0%, Deterministic)`
+- **Interleavings & TTFF:** Considered=`1` | Validated=`1` | Executed=`1` | TTFF=`348.972s`
 
-### Adversarial Interleaving Schedule
-1. **[G1]** Rebalance(src, dst, 10) calls src.Add(-10), acquiring src.mu, decrementing src.stock, and releasing src.mu
-2. **[G2]** CallerAuditInventory(src, dst) executes src.Count() and dst.Count(), observing the intermediate state where src.stock is decremented before dst.stock is incremented, violating the guarantee that the sum remains invariant across the operation from an outside observer's perspective.
-3. **[G1]** Rebalance calls dst.Add(10), acquiring dst.mu, incrementing dst.stock, and releasing dst.mu
+### Validated Interleaving Schedule
+1. **[G1]** (`Rebalance`) Calls src.Add(-qty), which locks src.mu, updates stock, and unlocks src.mu
+2. **[G2]** (`CallerAuditInventory`) Calls w1.Count() and w2.Count(), observing the state after src.Add but before dst.Add
+3. **[G1]** (`Rebalance`) Calls dst.Add(qty), which locks dst.mu, updates stock, and unlocks dst.mu
 
 ### Recommended Repair
-To make multi-warehouse transfers atomic, acquire locks in a consistent global order (e.g., ordered by memory address or ID) inside a higher-level transaction or transfer function, or protect multi-warehouse operations with a higher-level synchronization mechanism.
+To ensure atomicity across multiple warehouses, introduce a global lock or a hierarchical locking mechanism (e.g., sorting warehouse addresses to prevent deadlocks) to wrap the entire Rebalance operation, or accept that individual warehouse operations are atomic but the aggregate state is not.
 
 ---
 
-## Package `b10_waitgroup` — **VULNERABLE**
-- **Ground Truth:** `BUGGY` | **Detected:** `True`
+## Package `b10_waitgroup` — **SUSPECTED (UNREPRODUCED)**
+- **Ground Truth:** `BUGGY` | **Predicted Vulnerable:** `True` | **Empirically Reproduced:** `False`
 - **Bug Category:** WaitGroup Misuse
-- **Violated Rely-Guarantee Contract:** SpawnAndCollect spawns goroutines where wg.Add(1) is called *inside* the spawned goroutine instead of *before* spawning it, leading to a race condition where wg.Wait() may return prematurely before all goroutines have actually started or completed.
-- **Empirical Test Witnessed Bug:** `True` (Compiled: `True`)
+- **Violated Rely-Guarantee Contract:** SpawnAndCollect returns a value less than n because wg.Add(1) is called inside the spawned goroutine rather than the main loop.
+- **Specification Validation:** `Partially Correct` (30.0% weighted across 10 candidates)
+- **Test Pipeline:** Compiled=`False` | Executed=`False` | Reproducibility=`0/0 (0.0%, Unreproduced)`
+- **Interleavings & TTFF:** Considered=`1` | Validated=`1` | Executed=`1` | TTFF=`Nones`
 
-### Adversarial Interleaving Schedule
-1. **[Main]** SpawnAndCollect calls go func() i=0
-2. **[Main]** SpawnAndCollect calls wg.Wait() before the spawned goroutine executes wg.Add(1)
-3. **[Main]** wg.Wait() returns immediately because WaitGroup counter is still 0
-4. **[Spawned]** Goroutine finally runs, calls wg.Add(1), but wg.Wait() has already unblocked
+### Validated Interleaving Schedule
+1. **[Main]** (`SpawnAndCollect`) Executes wg.Wait() at line 18 before any spawned goroutine reaches line 13.
+2. **[G1]** (`SpawnAndCollect`) Executes wg.Add(1) at line 13 after the main goroutine has already passed wg.Wait().
 
 ### Recommended Repair
-Move wg.Add(1) outside and before the go func() call:
-for i := 0; i < n; i++ {
-	wg.Add(1)
+Move wg.Add(1) outside the anonymous function to the main loop: for i := 0; i < n; i++ { wg.Add(1); go func() { defer wg.Done(); completed.Add(1) }() }
+
+---
+
+## Package `b11_ctxleak` — **REPRODUCED BUG**
+- **Ground Truth:** `BUGGY` | **Predicted Vulnerable:** `True` | **Empirically Reproduced:** `True`
+- **Bug Category:** Goroutine Leak
+- **Violated Rely-Guarantee Contract:** FetchWithTimeout leaks the spawned goroutine and permanently retains w.mu lock when ctx is canceled before the unbuffered channel send completes
+- **Specification Validation:** `Partially Correct` (85.0% weighted across 10 candidates)
+- **Test Pipeline:** Compiled=`True` | Executed=`True` | Reproducibility=`5/5 (100.0%, Deterministic)`
+- **Interleavings & TTFF:** Considered=`2` | Validated=`2` | Executed=`1` | TTFF=`18.978s`
+
+### Validated Interleaving Schedule
+1. **[G1]** (`FetchWithTimeout`) Spawns background goroutine G2 and enters select block
+2. **[G1]** (`FetchWithTimeout`) Evaluates case <-ctx.Done(), exits function returning ("", false)
+3. **[G2]** (`FetchWithTimeout`) Acquires w.mu.Lock() at line 15
+4. **[G2]** (`FetchWithTimeout`) Attempts resCh <- "ok" at line 18 on unbuffered channel with no receiver; blocks indefinitely while holding w.mu
+
+### Recommended Repair
+func (w *Worker) FetchWithTimeout(ctx context.Context, fast bool) (string, bool) {
+	resCh := make(chan string, 1)
 	go func() {
-		defer wg.Done()
-		completed.Add(1)
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		if fast {
+			resCh <- "ok"
+		}
 	}()
+	select {
+	case v := <-resCh:
+		return v, true
+	case <-ctx.Done():
+		return "", false
+	}
 }
 
 ---
 
-## Package `b11_ctxleak` — **VULNERABLE**
-- **Ground Truth:** `BUGGY` | **Detected:** `True`
-- **Bug Category:** Goroutine Leak
-- **Violated Rely-Guarantee Contract:** FetchWithTimeout avoids blocking spawned goroutine indefinitely when context times out or is cancelled
-- **Empirical Test Witnessed Bug:** `False` (Compiled: `True`)
-
-### Adversarial Interleaving Schedule
-1. **[G1 (CallerQueryService)]** Calls FetchWithTimeout with a context that immediately times out or gets cancelled (or simulate slow path where ctx.Done() fires first).
-2. **[G2 (Spawned background goroutine)]** Executes w.mu.Lock() and blocks waiting for the mutex (if held externally), or runs and attempts unbuffered resCh <- "ok" send.
-3. **[G1 (FetchWithTimeout)]** select statement selects <-ctx.Done() because resCh is unbuffered and nobody is receiving from it yet, returning immediately and abandoning the spawned goroutine.
-4. **[G2 (Spawned background goroutine)]** Attempts to send on resCh <- "ok", but since G1 has already returned and abandoned the channel, G2 blocks forever on the channel send, leaking the goroutine.
-
-### Recommended Repair
-Make resCh a buffered channel of size 1 (`resCh := make(chan string, 1)`), or use context-aware select inside the spawned goroutine when sending.
-
----
-
-## Package `b12_slicealias` — **VULNERABLE**
-- **Ground Truth:** `BUGGY` | **Detected:** `True`
+## Package `b12_slicealias` — **REPRODUCED BUG**
+- **Ground Truth:** `BUGGY` | **Predicted Vulnerable:** `True` | **Empirically Reproduced:** `True`
 - **Bug Category:** Data Race
-- **Violated Rely-Guarantee Contract:** ProcessPartitions processes buffer partitions concurrently without violating memory safety
-- **Empirical Test Witnessed Bug:** `True` (Compiled: `True`)
+- **Violated Rely-Guarantee Contract:** ProcessPartitions is expected to safely process partitions without data races, but slicing `left := buf[:1]` retains the full backing array capacity (cap=3), causing append(left, 99) to mutate underlying element buf[1] concurrently with worker 2 writing right[0] = 42.
+- **Specification Validation:** `Partially Correct` (20.0% weighted across 10 candidates)
+- **Test Pipeline:** Compiled=`True` | Executed=`True` | Reproducibility=`5/5 (100.0%, Deterministic)`
+- **Interleavings & TTFF:** Considered=`1` | Validated=`1` | Executed=`1` | TTFF=`9.543s`
 
-### Adversarial Interleaving Schedule
-1. **[G1 (CallerSplitBuffer)]** Calls ProcessPartitions(data) with data = []int{1, 2, 3}
-2. **[G2 (ProcessPartitions)]** Slices left := buf[:1] (len 1, cap 3) and right := buf[1:2] (len 1, cap 2)
-3. **[G3 (First goroutine)]** Executes left = append(left, 99). Since len(left) is 1 and capacity is 3, append writes 99 into buf[1], resizing the shared slice's length.
-4. **[G4 (Second goroutine)]** Executes right[0] = 42. Concurrently writes to buf[1] (or adjacent memory depending on slicing), causing a data race on underlying memory elements.
+### Validated Interleaving Schedule
 
 ### Recommended Repair
-Avoid slicing overlapping or shared underlying arrays without synchronization, or use distinct allocations / proper synchronization mutexes when modifying shared backing arrays.
+Limit the capacity of the `left` slice when slicing so that `append` forces a new allocation instead of overwriting memory shared with `right`, e.g., `left := buf[:1:1]` (3-index slice expression).
 
 ---
 
-## Package `b13_doubletransfer` — **VULNERABLE**
-- **Ground Truth:** `BUGGY` | **Detected:** `True`
+## Package `b13_doubletransfer` — **SUSPECTED (UNREPRODUCED)**
+- **Ground Truth:** `BUGGY` | **Predicted Vulnerable:** `True` | **Empirically Reproduced:** `False`
 - **Bug Category:** Atomicity Violation
-- **Violated Rely-Guarantee Contract:** Transfer: Atomic money transfer between distinct vaults without creation or destruction of funds. Split-lock gap exists between src.Withdraw(amt) and dst.Deposit(amt) in Transfer().
-- **Empirical Test Witnessed Bug:** `False` (Compiled: `True`)
+- **Violated Rely-Guarantee Contract:** Transfer's postcondition that total sum of balances is preserved on success
+- **Specification Validation:** `Partially Correct` (50.0% weighted across 12 candidates)
+- **Test Pipeline:** Compiled=`True` | Executed=`True` | Reproducibility=`0/5 (0.0%, Unreproduced)`
+- **Interleavings & TTFF:** Considered=`1` | Validated=`1` | Executed=`1` | TTFF=`Nones`
 
-### Adversarial Interleaving Schedule
-1. **[G1]** Transfer(src, dst, 100) calls src.Withdraw(100), locks src.mu, decrements src.balance, unlocks src.mu, returns true.
-2. **[G2]** CallerAuditConservation(src, dst) or concurrent transfer reads intermediate state where funds have left src but not yet arrived at dst, violating the global conservation invariant.
-3. **[G1]** Transfer resumes and calls dst.Deposit(100), locking dst.mu and incrementing dst.balance.
+### Validated Interleaving Schedule
+1. **[G1]** (`Transfer`) start Transfer(src,dst,3) – lock src.mu
+2. **[G1]** (`Withdraw`) check balance 10, subtract 3, unlock src.mu
+3. **[G2]** (`Deposit`) lock src.mu, add 2, unlock src.mu
+4. **[G1]** (`Deposit`) lock dst.mu, add 3, unlock dst.mu
 
 ### Recommended Repair
-To make Transfer atomic across both vaults, acquire both locks in a consistent order (e.g., ordered by memory address to avoid deadlocks) or introduce a higher-level mutex/transaction mechanism: 
+Modify Transfer to lock both src and dst (in a consistent order) before performing Withdraw and Deposit, e.g.:
 
 func Transfer(src, dst *Vault, amt int) bool {
-	if src == dst {
-		return false
-	}
-	// Lock both in address order to prevent deadlock
-	var first, second *Vault
-	if &src.mu < &dst.mu {
-		first, second = src, dst
-	} else {
-		first, second = dst, src
-	}
-	first.mu.Lock()
-	defer first.mu.Unlock()
-	second.mu.Lock()
-	defer second.mu.Unlock()
-
-	if src.balance < amt {
-		return false
-	}
-	src.balance -= amt
-	dst.balance += amt
-	return true
+    // lock both vaults to avoid interleaving
+    first, second := src, dst
+    if uintptr(unsafe.Pointer(src)) > uintptr(unsafe.Pointer(dst)) {
+        first, second = dst, src
+    }
+    first.mu.Lock()
+    second.mu.Lock()
+    defer second.mu.Unlock()
+    defer first.mu.Unlock()
+    if src.balance < amt {
+        return false
+    }
+    src.balance -= amt
+    dst.balance += amt
+    return true
 }
 
----
-
-## Package `b14_poolpoison` — **VULNERABLE**
-- **Ground Truth:** `BUGGY` | **Detected:** `True`
-- **Bug Category:** Atomicity Violation
-- **Violated Rely-Guarantee Contract:** Premature pool/resource release before final field mutation (check-then-act / split-lock gap between Release and subsequent mutations on the returned buffer)
-- **Empirical Test Witnessed Bug:** `False` (Compiled: `True`)
-
-### Adversarial Interleaving Schedule
-1. **[G1]** CallerHandleSession calls p.Acquire(user), gets buf, then immediately calls p.Release(buf)
-2. **[G1]** Release adds buf back to p.free under p.mu
-3. **[G2]** Another goroutine calls p.Acquire(otherUser), pops buf from p.free, locks buf.mu, and modifies buf.owner and buf.dirty
-4. **[G1]** G1 resumes after Release and executes buf.mu.Lock(), buf.dirty = true, mutating a buffer that is now concurrently owned and used by G2
-
-### Recommended Repair
-Perform all mutations on the SessionBuf (such as setting dirty and inspecting/modifying fields) while still holding exclusive access or before releasing the buffer back to the pool. In CallerHandleSession, set buf.dirty = true BEFORE calling p.Release(buf).
 
 ---
 
-## Package `b15_oncefallback` — **VULNERABLE**
-- **Ground Truth:** `BUGGY` | **Detected:** `True`
-- **Bug Category:** Atomicity Violation
-- **Violated Rely-Guarantee Contract:** sync.Once caching transient errors permanently, preventing future successful initialization attempts.
-- **Empirical Test Witnessed Bug:** `False` (Compiled: `True`)
+## Package `b14_poolpoison` — **SUSPECTED (UNREPRODUCED)**
+- **Ground Truth:** `BUGGY` | **Predicted Vulnerable:** `True` | **Empirically Reproduced:** `False`
+- **Bug Category:** Data Race
+- **Violated Rely-Guarantee Contract:** CallerHandleSession may return a different owner than the one passed to Acquire because it releases the buffer before finishing its mutation of buf.owner and buf.dirty, violating the postcondition that the returned owner equals the caller's user.
+- **Specification Validation:** `Correct | Partially Correct | Incorrect` (100.0% weighted across 1 candidates)
+- **Test Pipeline:** Compiled=`True` | Executed=`True` | Reproducibility=`0/5 (0.0%, Unreproduced)`
+- **Interleavings & TTFF:** Considered=`2` | Validated=`2` | Executed=`2` | TTFF=`Nones`
 
-### Adversarial Interleaving Schedule
-1. **[G1]** Calls m.Init(true), enters m.once.Do and sets m.err = errors.New("dial timeout")
-2. **[G2]** Calls m.Init(false), m.once.Do skips execution because once has already run (due to G1's failure), returns m.conn ("") and m.err ("dial timeout") permanently
-
-### Recommended Repair
-Remove sync.Once or implement a retry loop using sync.Mutex where initialization repeats until m.err == nil.
-
----
-
-## Package `b16_subpubrace` — **VULNERABLE**
-- **Ground Truth:** `BUGGY` | **Detected:** `True`
-- **Bug Category:** Atomicity Violation
-- **Violated Rely-Guarantee Contract:** CallerWatchFromCurrent expects to observe a consistent snapshot where any event published after LatestVersion() returns is guaranteed to be delivered to the channel returned by Subscribe().
-- **Empirical Test Witnessed Bug:** `True` (Compiled: `True`)
-
-### Adversarial Interleaving Schedule
-1. **[G1 (CallerWatchFromCurrent)]** Calls b.LatestVersion() -> acquires mu, reads version = 1, releases mu.
-2. **[G2 (Publisher)]** Calls b.PublishNext() -> acquires mu, increments version to 2, broadcasts version 2 to existing subs (none yet), releases mu.
-3. **[G1 (CallerWatchFromCurrent)]** Calls b.Subscribe() -> acquires mu, appends new channel ch to b.subs, releases mu.
+### Validated Interleaving Schedule
+1. **[G1]** (`CallerHandleSession`) call Acquire(user="Alice") -> bufA
+2. **[G1]** (`CallerHandleSession`) call Release(bufA) (bufA added to p.free)
+3. **[G2]** (`CallerHandleSession`) call Acquire(user="Bob") -> obtains same bufA
+4. **[G2]** (`CallerHandleSession`) call Release(bufA) (bufA re‑added to p.free)
+5. **[G1]** (`CallerHandleSession`) bufA.mu.Lock()
+6. **[G1]** (`CallerHandleSession`) bufA.dirty = true
+7. **[G1]** (`CallerHandleSession`) owner = bufA.owner  // reads "Bob"
+8. **[G1]** (`CallerHandleSession`) bufA.mu.Unlock()
+9. **[G1]** (`CallerHandleSession`) return owner
 
 ### Recommended Repair
-Combine LatestVersion and Subscribe into a single atomic method under one lock acquisition, e.g., func (b *EventBroker) WatchFromCurrent() (int, chan int) { b.mu.Lock(); defer b.mu.Unlock(); ch := make(chan int, 1); b.subs = append(b.subs, ch); return b.version, ch }
+Reorder operations in CallerHandleSession so the buffer is mutated before it is released back to the pool. Example fix:
 
----
-
-## Package `b17_timerreset` — **VULNERABLE**
-- **Ground Truth:** `BUGGY` | **Detected:** `True`
-- **Bug Category:** Atomicity Violation
-- **Violated Rely-Guarantee Contract:** time.Timer.Reset() called without draining timer.C when Stop() returns false can cause Reset() to fail to reset properly or channel to be out of sync.
-- **Empirical Test Witnessed Bug:** `False` (Compiled: `True`)
-
-### Adversarial Interleaving Schedule
-1. **[G1]** Calls w.Kick(d) which fires timer and successfully stops it before it's read, or timer expires naturally.
-2. **[G2]** Calls w.Kick(d) where w.timer.Stop() returns false because the timer has already fired and its channel contains an unread expiration value.
-3. **[G2]** Executes w.timer.Reset(d) without draining the stale value from w.timer.C, leading to potential premature expiration or protocol violation.
-
-### Recommended Repair
-func (w *Watchdog) Kick(d time.Duration) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if !w.timer.Stop() {
-		select {
-		case <-w.timer.C:
-		default:
-		}
-	}
-	w.timer.Reset(d)
+func CallerHandleSession(p *SessionPool, user string) string {
+    buf := p.Acquire(user)
+    buf.mu.Lock()
+    buf.dirty = true
+    owner := buf.owner
+    buf.mu.Unlock()
+    p.Release(buf) // now buffer is safely returned after all mutations
+    return owner
 }
 
+This eliminates the premature Release and guarantees that the returned owner matches the caller's user and that dirty flag updates are not lost.
+
 ---
 
-## Package `b18_nestedrw` — **VULNERABLE**
-- **Ground Truth:** `BUGGY` | **Detected:** `True`
-- **Bug Category:** Deadlock
-- **Violated Rely-Guarantee Contract:** Reentrant RWMutex.RLock() calls that deadlock when a concurrent writer calls Lock()
-- **Empirical Test Witnessed Bug:** `True` (Compiled: `True`)
+## Package `b15_oncefallback` — **SUSPECTED (UNREPRODUCED)**
+- **Ground Truth:** `BUGGY` | **Predicted Vulnerable:** `True` | **Empirically Reproduced:** `False`
+- **Bug Category:** Atomicity Violation | Data Race | None
+- **Violated Rely-Guarantee Contract:** m.once.Do() is called before m.mu is locked
+- **Specification Validation:** `Incorrect` (40.0% weighted across 10 candidates)
+- **Test Pipeline:** Compiled=`True` | Executed=`True` | Reproducibility=`0/5 (0.0%, Unreproduced)`
+- **Interleavings & TTFF:** Considered=`1` | Validated=`1` | Executed=`1` | TTFF=`Nones`
 
-### Adversarial Interleaving Schedule
-1. **[G1]** Calls ReadWithFallback, acquires r.mu.RLock() at line 21.
-2. **[G1]** Calls r.lookupInternal(fallback) inside ReadWithFallback while holding r.mu.RLock().
-3. **[G1]** Attempts to acquire r.mu.RLock() inside lookupInternal (line 15) while already holding r.mu (reentrant RLock).
-4. **[G2]** Attempts to call Update, requesting r.mu.Lock(). In Go, sync.RWMutex is NOT reentrant. If a pending Writer (G2) is waiting for the lock, a goroutine (G1) holding an RLock that tries to recursively acquire RLock will block behind the writer, causing a permanent deadlock.
+### Validated Interleaving Schedule
+1. **[G1]** (`Init`) m.once.Do()
+2. **[G2]** (`Init`) m.mu.Lock()
 
 ### Recommended Repair
-Remove the inner locking from lookupInternal and make it an unexported helper that expects the caller to already hold r.mu. For example:
+Move m.once.Do() after m.mu.Lock() in Init function
 
-func (r *Registry) lookupInternal(k string) int {
-	return r.items[k]
-}
+---
 
-And ensure ReadWithFallback and lookupInternal do not nest RLock calls.
+## Package `b16_subpubrace` — **SAFE (VERIFIED)**
+- **Ground Truth:** `BUGGY` | **Predicted Vulnerable:** `False` | **Empirically Reproduced:** `False`
+- **Bug Category:** None
+- **Violated Rely-Guarantee Contract:** None
+- **Specification Validation:** `Partially Correct` (79.17% weighted across 12 candidates)
+- **Test Pipeline:** Compiled=`True` | Executed=`True` | Reproducibility=`0/5 (0.0%, Unreproduced)`
+- **Interleavings & TTFF:** Considered=`0` | Validated=`0` | Executed=`1` | TTFF=`Nones`
+
+### Validated Interleaving Schedule
+
+### Recommended Repair
+
+
+---
+
+## Package `b17_timerreset` — **SUSPECTED (UNREPRODUCED)**
+- **Ground Truth:** `BUGGY` | **Predicted Vulnerable:** `True` | **Empirically Reproduced:** `False`
+- **Bug Category:** Atomicity Violation | Deadlock | Channel Bug | Condition Variable Bug | Data Race | WaitGroup Misuse | Goroutine Leak | None
+- **Violated Rely-Guarantee Contract:** Caller expectation or invariant violation
+- **Specification Validation:** `Incorrect` (42.86% weighted across 7 candidates)
+- **Test Pipeline:** Compiled=`True` | Executed=`True` | Reproducibility=`0/5 (0.0%, Unreproduced)`
+- **Interleavings & TTFF:** Considered=`3` | Validated=`1` | Executed=`1` | TTFF=`Nones`
+
+### Validated Interleaving Schedule
+
+### Recommended Repair
+No repair needed.
+
+---
+
+## Package `b18_nestedrw` — **SAFE (VERIFIED)**
+- **Ground Truth:** `BUGGY` | **Predicted Vulnerable:** `False` | **Empirically Reproduced:** `False`
+- **Bug Category:** None
+- **Violated Rely-Guarantee Contract:** None
+- **Specification Validation:** `Partially Correct` (40.0% weighted across 10 candidates)
+- **Test Pipeline:** Compiled=`True` | Executed=`True` | Reproducibility=`0/5 (0.0%, Unreproduced)`
+- **Interleavings & TTFF:** Considered=`0` | Validated=`0` | Executed=`1` | TTFF=`Nones`
+
+### Validated Interleaving Schedule
+
+### Recommended Repair
+None
 
 ---
 
 ## Package `c01_safebank` — **SAFE (VERIFIED)**
-- **Ground Truth:** `SAFE` | **Detected:** `False`
+- **Ground Truth:** `SAFE` | **Predicted Vulnerable:** `False` | **Empirically Reproduced:** `False`
 - **Bug Category:** None
 - **Violated Rely-Guarantee Contract:** None
-- **Empirical Test Witnessed Bug:** `False` (Compiled: `True`)
+- **Specification Validation:** `Correct | Partially Correct | Incorrect` (0.0% weighted across 5 candidates)
+- **Test Pipeline:** Compiled=`True` | Executed=`True` | Reproducibility=`0/5 (0.0%, Unreproduced)`
+- **Interleavings & TTFF:** Considered=`0` | Validated=`0` | Executed=`1` | TTFF=`Nones`
 
-### Adversarial Interleaving Schedule
+### Validated Interleaving Schedule
 
 ### Recommended Repair
 None
 
 ---
 
-## Package `c02_safepool` — **SAFE (VERIFIED)**
-- **Ground Truth:** `SAFE` | **Detected:** `False`
-- **Bug Category:** None
-- **Violated Rely-Guarantee Contract:** None
-- **Empirical Test Witnessed Bug:** `False` (Compiled: `False`)
+## Package `c02_safepool` — **SUSPECTED (UNREPRODUCED)**
+- **Ground Truth:** `SAFE` | **Predicted Vulnerable:** `True` | **Empirically Reproduced:** `False`
+- **Bug Category:** Deadlock | Data Race | WaitGroup Misuse
+- **Violated Rely-Guarantee Contract:** SafeWorkerPool may deadlock if wg.Done() is called before wg.Wait()
+- **Specification Validation:** `Partially Correct` (25.0% weighted across 10 candidates)
+- **Test Pipeline:** Compiled=`True` | Executed=`True` | Reproducibility=`0/5 (0.0%, Unreproduced)`
+- **Interleavings & TTFF:** Considered=`1` | Validated=`1` | Executed=`1` | TTFF=`Nones`
 
-### Adversarial Interleaving Schedule
+### Validated Interleaving Schedule
+1. **[G1]** (`SafeWorkerPool`) defer wg.Done()
+2. **[G2]** (`SafeWorkerPool`) wg.Wait()
 
 ### Recommended Repair
-None
+No repair needed.
 
 ---
 
-## Package `c03_epochcommit` — **SAFE (VERIFIED)**
-- **Ground Truth:** `SAFE` | **Detected:** `False`
-- **Bug Category:** None
-- **Violated Rely-Guarantee Contract:** None
-- **Empirical Test Witnessed Bug:** `False` (Compiled: `True`)
+## Package `c03_epochcommit` — **SUSPECTED (UNREPRODUCED)**
+- **Ground Truth:** `SAFE` | **Predicted Vulnerable:** `True` | **Empirically Reproduced:** `False`
+- **Bug Category:** Deadlock
+- **Violated Rely-Guarantee Contract:** CallerOptimisticAdd precondition violated: caller must hold s.mu.Lock() but does not
+- **Specification Validation:** `Incorrect` (0.0% weighted across 18 candidates)
+- **Test Pipeline:** Compiled=`True` | Executed=`True` | Reproducibility=`0/5 (0.0%, Unreproduced)`
+- **Interleavings & TTFF:** Considered=`1` | Validated=`1` | Executed=`1` | TTFF=`Nones`
 
-### Adversarial Interleaving Schedule
+### Validated Interleaving Schedule
 
 ### Recommended Repair
-The current implementation is safe because CallerOptimisticAdd correctly uses the epoch returned by Read as a version token for the CompareAndCommit operation, ensuring atomicity of the read-modify-write cycle despite the split-lock gap.
+No repair needed.
 
 ---
 
-## Package `c04_actorloop` — **SAFE (VERIFIED)**
-- **Ground Truth:** `SAFE` | **Detected:** `False`
-- **Bug Category:** None
-- **Violated Rely-Guarantee Contract:** None
-- **Empirical Test Witnessed Bug:** `False` (Compiled: `True`)
+## Package `c04_actorloop` — **REPRODUCED BUG**
+- **Ground Truth:** `SAFE` | **Predicted Vulnerable:** `True` | **Empirically Reproduced:** `True`
+- **Bug Category:** Deadlock
+- **Violated Rely-Guarantee Contract:** CallerActorPay guarantees that a.ops is non‑empty after return, but after Withdraw returns len(a.ops) == 0 (unbuffered channel), violating the spec
+- **Specification Validation:** `Incorrect` (0.0% weighted across 13 candidates)
+- **Test Pipeline:** Compiled=`True` | Executed=`True` | Reproducibility=`5/5 (100.0%, Deterministic)`
+- **Interleavings & TTFF:** Considered=`4` | Validated=`2` | Executed=`2` | TTFF=`55.661s`
 
-### Adversarial Interleaving Schedule
+### Validated Interleaving Schedule
+1. **[G1]** (`NewActorLedger`) spawn actor loop (go func)
+2. **[G2]** (`CallerActorPay`) call a.Withdraw(10)
+3. **[G2]** (`Withdraw`) send req on a.ops (blocks until actor receives)
+4. **[G1]** (`actor loop (anonymous)`) receive req, compute, send true on r.resp
+5. **[G2]** (`Withdraw`) receive reply, return true
+6. **[G2]** (`CallerActorPay`) return true
+7. **[G2]** (`CallerActorPay`) assert len(a.ops) > 0 (fails, len == 0)
 
 ### Recommended Repair
-None
+Add a shutdown mechanism: include a dedicated "close" request type or a separate stop channel; on Close() send the signal, have the actor loop break out of the range and exit. Also, document that CallerActorPay requires a non‑nil ActorLedger and guard against nil by returning false early. If you need to assert the channel is non‑empty, use a buffered channel or expose a separate state variable instead of len(a.ops).
 
 ---
 
 ## Package `c05_cowatomic` — **SAFE (VERIFIED)**
-- **Ground Truth:** `SAFE` | **Detected:** `False`
+- **Ground Truth:** `SAFE` | **Predicted Vulnerable:** `False` | **Empirically Reproduced:** `False`
 - **Bug Category:** None
 - **Violated Rely-Guarantee Contract:** None
-- **Empirical Test Witnessed Bug:** `False` (Compiled: `True`)
+- **Specification Validation:** `Correct` (50.0% weighted across 1 candidates)
+- **Test Pipeline:** Compiled=`False` | Executed=`False` | Reproducibility=`0/0 (0.0%, Unreproduced)`
+- **Interleavings & TTFF:** Considered=`2` | Validated=`2` | Executed=`1` | TTFF=`Nones`
 
-### Adversarial Interleaving Schedule
+### Validated Interleaving Schedule
+1. **[G1]** (`Update`) acquire r.mu, store new RouteTable
+2. **[G2]** (`Get`) load r.cur
+3. **[G1]** (`Update`) release r.mu
+4. **[G2]** (`Get`) return pointer
 
 ### Recommended Repair
-None
+No changes needed; code is safe.
 
 ---
 
 ## Package `c06_semctx` — **SAFE (VERIFIED)**
-- **Ground Truth:** `SAFE` | **Detected:** `False`
+- **Ground Truth:** `SAFE` | **Predicted Vulnerable:** `False` | **Empirically Reproduced:** `False`
 - **Bug Category:** None
-- **Violated Rely-Guarantee Contract:** None if safe
-- **Empirical Test Witnessed Bug:** `False` (Compiled: `True`)
+- **Violated Rely-Guarantee Contract:** None
+- **Specification Validation:** `Partially Correct` (29.17% weighted across 12 candidates)
+- **Test Pipeline:** Compiled=`True` | Executed=`True` | Reproducibility=`0/5 (0.0%, Unreproduced)`
+- **Interleavings & TTFF:** Considered=`1` | Validated=`1` | Executed=`1` | TTFF=`Nones`
 
-### Adversarial Interleaving Schedule
+### Validated Interleaving Schedule
+1. **[G1]** (`Do`) G1 sends to l.sem before G2 sends to l.sem
+2. **[G2]** (`Do`) G2 sends to l.sem before G1 sends to l.sem
 
 ### Recommended Repair
-None
+No repair needed.
 
 ---
 
 ## Package `c07_lockedhelper` — **SAFE (VERIFIED)**
-- **Ground Truth:** `SAFE` | **Detected:** `False`
+- **Ground Truth:** `SAFE` | **Predicted Vulnerable:** `False` | **Empirically Reproduced:** `False`
 - **Bug Category:** None
 - **Violated Rely-Guarantee Contract:** None
-- **Empirical Test Witnessed Bug:** `False` (Compiled: `True`)
+- **Specification Validation:** `Partially Correct` (79.17% weighted across 12 candidates)
+- **Test Pipeline:** Compiled=`True` | Executed=`True` | Reproducibility=`0/5 (0.0%, Unreproduced)`
+- **Interleavings & TTFF:** Considered=`2` | Validated=`2` | Executed=`1` | TTFF=`Nones`
 
-### Adversarial Interleaving Schedule
+### Validated Interleaving Schedule
+1. **[G1]** (`CallerAtomicRebalance`) Acquires l.mu.Lock()
+2. **[G2]** (`CallerTotal`) Blocks on l.mu.Lock() waiting for G1 to release
+3. **[G1]** (`subCheckingLocked`) Checks l.checking >= amt and subtracts amt from l.checking
+4. **[G1]** (`addSavingsLocked`) Adds amt to l.savings
+5. **[G1]** (`CallerAtomicRebalance`) Releases l.mu.Unlock()
+6. **[G2]** (`CallerTotal`) Acquires l.mu.Lock(), reads l.checking + l.savings, and releases l.mu.Unlock()
 
 ### Recommended Repair
-None
+No repair needed. The code correctly uses a mutex to protect shared state, and the helper functions are properly designed to be called only while the lock is held.
 
 ---
 
-## Package `c08_confinedworker` — **SAFE (VERIFIED)**
-- **Ground Truth:** `SAFE` | **Detected:** `False`
-- **Bug Category:** None
-- **Violated Rely-Guarantee Contract:** None
-- **Empirical Test Witnessed Bug:** `False` (Compiled: `True`)
+## Package `c08_confinedworker` — **SUSPECTED (UNREPRODUCED)**
+- **Ground Truth:** `SAFE` | **Predicted Vulnerable:** `True` | **Empirically Reproduced:** `False`
+- **Bug Category:** Atomicity Violation | Deadlock | Channel Bug | Condition Variable Bug | Data Race | WaitGroup Misuse | Goroutine Leak | None
+- **Violated Rely-Guarantee Contract:** The sum of all deltas for a given key is not maintained correctly
+- **Specification Validation:** `Partially Correct` (45.83% weighted across 12 candidates)
+- **Test Pipeline:** Compiled=`True` | Executed=`True` | Reproducibility=`0/5 (0.0%, Unreproduced)`
+- **Interleavings & TTFF:** Considered=`2` | Validated=`1` | Executed=`1` | TTFF=`Nones`
 
-### Adversarial Interleaving Schedule
+### Validated Interleaving Schedule
 
 ### Recommended Repair
-None
+No repair needed.
 
 ---

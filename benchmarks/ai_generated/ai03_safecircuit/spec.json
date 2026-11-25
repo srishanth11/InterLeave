@@ -1,0 +1,10 @@
+{
+  "id": "AI03",
+  "source": "AI-generated (LLM code synthesis prompt: thread-safe circuit breaker)",
+  "ground_truth_buggy": false,
+  "category": "Safe Control",
+  "scenario": "AI-Generated Mutex-Guarded Circuit Breaker with Unlocked Helper",
+  "rely": "Callers of tripLocked() hold cb.mu.Lock().",
+  "guarantee": "cb.open is true iff cb.failures >= 3.",
+  "interleaving_trigger": "None (Safe)"
+}

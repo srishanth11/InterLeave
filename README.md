@@ -1,34 +1,28 @@
-# InterleaveGuard: Automated Concurrency Vulnerability Auditing for Go via Top-Down Rely-Guarantee Synthesis
+# InterLeave: Automated Concurrency Verification & Interleaving-Guided Test Synthesis for Go
 
-**InterleaveGuard** is a formal concurrency auditing pipeline for Go programs that detects high-level logical concurrency bugs—such as split-lock atomicity violations, check-then-act (TOCTOU) gaps, reentrant `sync.RWMutex` deadlocks, and undrained `time.Timer` resets—that pass Go's built-in dynamic race detector (`go test -race`) without triggering data races.
+**InterLeave** is a hybrid static-dynamic concurrency verification framework for Go packages. It combines Go `go/ast` structural extraction, LLM-synthesized **Caller-Driven Rely-Guarantee (RG)** specifications, deterministic AST-validated interleaving exploration, and automated reproducible Go test generation (`go test -race`).
 
-By combining static Go AST/call-graph extraction (`go/ast`), **top-down caller-driven Rely-Guarantee ($\langle R, G \rangle \vdash \{P\}\ C\ \{Q\}$) specification synthesis**, and **compilation-gated deterministic Go test generation**, InterleaveGuard distinguishes genuine concurrency vulnerabilities from intentional caller-enforced synchronization.
+## Architecture
 
----
+1. **AST Structural & Concurrency Extractor (`go_ast_extractor/`):**
+   Parses target Go packages using `go/ast` and `go/parser` to extract shared struct/global state, synchronization primitives (`sync.Mutex`, `sync.RWMutex`, `sync.Cond`, `sync.Once`, `sync.WaitGroup`, `atomic`, channels), lock acquisition sequences, and exported API entry points.
+2. **Caller-Driven Rely-Guarantee Specification Synthesizer (`engine/spec_synth.py`):**
+   Generates >=10 candidate Rely-Guarantee contracts (caller assumptions, state invariants, atomic region expectations, and lock-ordering obligations) per package and grades them against ground-truth concurrency contracts.
+3. **AST-Validated Schedule Explorer (`engine/schedule_explorer.py`):**
+   Identifies high-risk multi-goroutine interleavings that violate inferred RG contracts and validates every candidate schedule against extracted AST methods and synchronization primitives to prune hallucinated operations.
+4. **Reproducible Concurrency Test Generator (`engine/test_gen.py`):**
+   Synthesizes standalone `_test.go` stress and barrier-guided harnesses, verifies compilation (`go test -c`), executes under `go test -race`, measures Time-to-First-Failure (TTFF), and classifies bugs as **Deterministic** or **Probabilistic** across 5 repeated trials.
 
-## Architecture Overview
+## Benchmark Suite (`benchmarks/`)
 
-```text
-Target Go Package (benchmarks/*/target.go)
-       │
-       ▼
-1. Go AST & Sync Analyzer (analyzer/extract.go)
-   └─ Extracts structs, line ranges, caller/callee edges, and sync primitives
-       │
-       ▼
-2. Top-Down RG Spec Synthesizer (engine/spec_synth.py)
-   └─ Kahn's topological layering (Layer 0 callers -> Layer k callees)
-   └─ Synthesizes <R, G> |- {P} C {Q} + expected_callees obligations
-       │
-       ▼
-3. Interleaving Schedule Explorer (engine/schedule_explorer.py)
-   └─ Checks caller-callee contract discharge & Go concurrency invariants
-       │
-       ▼
-4. Deterministic Witness Test Generator (engine/test_gen.py)
-   └─ Emits interleaveguard_gen_test.go with channel start barriers
-   └─ Executes `go test -race -timeout 5s` with compilation gating
-       │
-       ▼
-5. Audit Reporter & Evaluation Harness (engine/reporter.py, engine/run_eval.py)
-   └─ Outputs results/eval_summary.json & results/report.md
+- **Seeded Suite (`b01`–`b18` Buggy, `c01`–`c08` Safe — 26 Packages):** Covers lost updates, check-then-act TOCTOU races, lock-order deadlocks, RWMutex upgrades, lost `sync.Cond` wakeups, broken double-checked locking, WaitGroup misuse, context leaks, slice aliasing, double transfers, pool poisoning, `sync.Once` fallback races, pub/sub races, timer resets, and safe concurrency patterns.
+- **AI-Generated Code Suite (`ai01`–`ai04` — 4 Packages):** Evaluates generalization on unseen LLM-authored concurrent Go modules (`ai01_ratelimiter`, `ai02_cacheclose`, `ai03_safecircuit`, `ai04_safebatch`).
+
+## Reproducing the Evaluation
+
+```bash
+# Set an LLM provider key (Gemini, Groq, OpenAI, or Anthropic)
+export GEMINI_API_KEY="your-api-key"
+
+# Run full uncached evaluation (resumes automatically from results/fresh_checkpoint.json)
+python3 engine/run_eval.py --fresh
